@@ -259,75 +259,265 @@
     });
   }
 
-  /* ── Takvim (gün görünümü, hekim başına sütun) ─────────────────────── */
-  var calDate = today(), calDoc = 0;
-  function vCal(v, args) {
-    if (args[0] && /^\d{4}-\d{2}-\d{2}$/.test(args[0])) calDate = args[0];
-    if (!calDoc && S.user.role === 'doctor' && S.user.doctor_id) calDoc = S.user.doctor_id;
-    var docs = activeDoctors().filter(function (d) { return !calDoc || d.id === calDoc; });
-    return api('GET', '/appointments?from=' + calDate + '&to=' + calDate, undefined, bgRefresh).then(function (r) {
-      var wd = new Date(calDate + 'T12:00:00').getDay();
-      var closed = (S.settings.closed_dates || []).indexOf(calDate) >= 0;
-      // görünen saat aralığı: hekim saatleri ve randevuları kapsasın
-      var lo = 8 * 60, hi = 20 * 60;
-      docs.forEach(function (d) { (d.hours[wd] || []).forEach(function (h) { lo = Math.min(lo, toMin(h[0])); hi = Math.max(hi, toMin(h[1])); }); });
-      r.items.forEach(function (a) { lo = Math.min(lo, toMin(a.start.slice(11))); hi = Math.max(hi, toMin(a.end.slice(11))); });
-      lo = Math.floor(lo / 60) * 60; hi = Math.ceil(hi / 60) * 60;
-      var STEP = 15, RH = 26, rows = (hi - lo) / STEP;
+  /* ── Takvim: Gün / Hafta / Ay (iOS Takvim düzeninde) ──────────────────
+     Adres: #/takvim/<gun|hafta|ay>/<YYYY-AA-GG>. Oklar, “Bugün”, gün şeridi, kaydırma hareketi
+     (dokunmatik ve trackpad) ve klavye (← → · T bugün · G/H/A görünüm) ile gezilir. */
+  var CAL = { view: 'gun', date: today(), doc: 0, scroll: null, dir: 0 };
+  try { var savedView = localStorage.getItem('atlas-cal-view'); if (/^(gun|hafta|ay)$/.test(savedView)) CAL.view = savedView; } catch (e) {}
+  var CAL_VIEWS = { gun: 'Gün', hafta: 'Hafta', ay: 'Ay' };
+  var DSHORT = ['Paz', 'Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt'];
+  var MONTHS_F = ['Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran', 'Temmuz', 'Ağustos', 'Eylül', 'Ekim', 'Kasım', 'Aralık'];
+  var wdOf = function (s) { return new Date(s + 'T12:00:00').getDay(); };
+  var mondayOf = function (s) { return addDays(s, -((wdOf(s) + 6) % 7)); };
+  var dnum = function (s) { return +s.slice(8, 10); };
+  var mname = function (s) { return MONTHS_F[+s.slice(5, 7) - 1]; };
+  function calHash(view, date) { return '#/takvim/' + view + '/' + date; }
+  function calGo(view, date, dir) { CAL.dir = dir || 0; location.hash = calHash(view, date); }
+  function calShift(n) {
+    var d = CAL.date;
+    if (CAL.view === 'gun') d = addDays(d, n);
+    else if (CAL.view === 'hafta') d = addDays(d, 7 * n);
+    else { var x = new Date(d.slice(0, 7) + '-01T12:00:00'); x.setMonth(x.getMonth() + n); d = ymd(x); }
+    calGo(CAL.view, d, n);
+  }
 
-      var head = '<div class="cal__corner"></div>' + docs.map(function (d) {
-        var n = r.items.filter(function (a) { return a.doctor_id === d.id && a.status !== 'cancelled'; }).length;
-        return '<div class="cal__dh"><span class="dot" style="background:' + esc(d.color) + '"></span>' + esc(docName(d)) + '<span class="badge">' + n + '</span></div>';
+  /* Çakışan randevular yan yana: her kümede şerit sayısı kadar bölünür */
+  function lanes(evs) {
+    var out = {}, sorted = evs.slice().sort(function (a, b) { return a.s - b.s || b.e - a.e; }), cluster = [], end = -1;
+    function flush() {
+      var ln = [];
+      cluster.forEach(function (ev) {
+        var i = 0; while (ln[i] !== undefined && ln[i] > ev.s) i++;
+        ln[i] = ev.e; out[ev.id] = { lane: i };
+      });
+      cluster.forEach(function (ev) { out[ev.id].n = ln.length; });
+      cluster = [];
+    }
+    sorted.forEach(function (ev) { if (ev.s >= end) { flush(); end = -1; } cluster.push(ev); end = Math.max(end, ev.e); });
+    flush();
+    return out;
+  }
+
+  function vCal(v, args) {
+    // eski adres biçimi (#/takvim/2026-10-22) de çalışsın
+    if (/^(gun|hafta|ay)$/.test(args[0])) { CAL.view = args[0]; args = args.slice(1); }
+    if (args[0] && /^\d{4}-\d{2}-\d{2}$/.test(args[0])) CAL.date = args[0];
+    try { localStorage.setItem('atlas-cal-view', CAL.view); } catch (e) {}
+    if (CAL.lastView !== CAL.view) { CAL.scroll = null; CAL.lastView = CAL.view; }
+    if (!CAL.doc && S.user.role === 'doctor' && S.user.doctor_id) CAL.doc = S.user.doctor_id;
+    var date = CAL.date, view = CAL.view;
+    var from, to, title, sub;
+    if (view === 'gun') { from = to = date; title = dnum(date) + ' ' + mname(date) + ' ' + date.slice(0, 4); sub = fmtDate(date, { weekday: 'long' }); }
+    else if (view === 'hafta') {
+      from = mondayOf(date); to = addDays(from, 6);
+      title = from.slice(5, 7) === to.slice(5, 7) ? dnum(from) + '–' + dnum(to) + ' ' + mname(to) + ' ' + to.slice(0, 4)
+        : dnum(from) + ' ' + mname(from) + ' – ' + dnum(to) + ' ' + mname(to) + ' ' + to.slice(0, 4);
+      sub = 'Hafta';
+    } else {
+      from = mondayOf(date.slice(0, 7) + '-01'); to = addDays(from, 41);
+      title = mname(date) + ' ' + date.slice(0, 4); sub = 'Ay';
+    }
+    var isToday = function (d) { return d === today(); };
+    var closedSet = S.settings.closed_dates || [];
+    var docsAll = activeDoctors(), docs = docsAll.filter(function (d) { return !CAL.doc || d.id === CAL.doc; });
+    var qs = '/appointments?from=' + from + '&to=' + to + (CAL.doc ? '&doctor=' + CAL.doc : '');
+    var keepScroll = bgRefresh && $('.cal', v) ? $('.cal', v).scrollTop : null;
+
+    return api('GET', qs, undefined, bgRefresh).then(function (r) {
+      var items = r.items;
+
+      v.innerHTML =
+        '<div class="calhead"><div><h1 class="caltitle">' + esc(title) + '</h1><p class="mut calsub">' + esc(sub) +
+        (view === 'gun' && closedSet.indexOf(date) >= 0 ? ' · <span class="badge st-cancelled">Klinik kapalı</span>' : '') + '</p></div>' +
+        '<div class="row calctl">' +
+        '<div class="seg js-view" role="tablist" aria-label="Görünüm">' + Object.keys(CAL_VIEWS).map(function (k) {
+          return '<button type="button" role="tab" data-v="' + k + '" aria-selected="' + (k === view) + '" class="' + (k === view ? 'on' : '') + '">' + CAL_VIEWS[k] + '</button>'; }).join('') + '</div>' +
+        '<div class="row" style="gap:.3rem"><button class="btn js-prev" aria-label="Önceki ' + CAL_VIEWS[view].toLowerCase() + '">' + ic('left') + '</button>' +
+        '<button class="btn js-today">Bugün</button>' +
+        '<button class="btn js-next" aria-label="Sonraki ' + CAL_VIEWS[view].toLowerCase() + '">' + ic('right') + '</button></div>' +
+        '<input type="date" class="js-date" value="' + date + '" aria-label="Tarihe git" style="width:auto">' +
+        '<select class="js-doc" style="width:auto" aria-label="Hekim"><option value="0">Tüm hekimler</option>' + docsAll.map(function (d) {
+          return '<option value="' + d.id + '"' + (d.id === CAL.doc ? ' selected' : '') + '>' + esc(docName(d)) + '</option>'; }).join('') + '</select>' +
+        '<button class="btn btn--p js-new">' + ic('plus') + 'Randevu</button></div></div>' +
+        '<div class="calbody js-body' + (CAL.dir ? ' slide-' + (CAL.dir > 0 ? 'l' : 'r') : '') + '"></div>' +
+        '<p class="mut calhint">Boş bir saate tıklayarak randevu ekleyin · Taralı alanlar çalışma saati dışıdır · ' +
+        '<span class="hide-m">Klavye: ← → gezin, T bugün, G/H/A görünüm · </span>Kaydırarak da ilerleyebilirsiniz.</p>';
+      CAL.dir = 0;
+      var body = $('.js-body', v);
+
+      if (!docs.length) { body.innerHTML = '<div class="card"><p class="empty">Aktif hekim yok. ' + (isAdmin() ? '<a href="#/hekimler">Hekim ekleyin</a>.' : '') + '</p></div>'; }
+      else if (view === 'ay') monthView(body, items, from, date);
+      else timeGrid(body, items, view, from, docs);
+
+      // denetimler
+      $$('.js-view button', v).forEach(function (b) { b.onclick = function () { calGo(b.dataset.v, date); }; });
+      $('.js-prev', v).onclick = function () { calShift(-1); };
+      $('.js-next', v).onclick = function () { calShift(1); };
+      $('.js-today', v).onclick = function () { var t = today(); calGo(view, t, t > date ? 1 : t < date ? -1 : 0); };
+      $('.js-date', v).onchange = function (e) { if (e.target.value) calGo(view, e.target.value); };
+      $('.js-doc', v).onchange = function (e) { CAL.doc = +e.target.value; route(); };
+      $('.js-new', v).onclick = function () { openAppt({ date: view === 'gun' ? date : (date >= from && date <= to ? date : from), doctor_id: CAL.doc || undefined }); };
+      swipe(body);
+
+      // kaydırma: arka plan yenilemesinde konum korunur; ilk açılışta mesai başına ya da şu ana
+      var cal = $('.cal', body);
+      if (cal) {
+        if (keepScroll !== null) cal.scrollTop = keepScroll;
+        else if (CAL.scroll !== null) cal.scrollTop = CAL.scroll;
+        else {
+          var nowEl = $('.cal__now', cal), firstOn = $('.cal__slot:not(.off)', cal);
+          cal.scrollTop = Math.max(0, (nowEl ? nowEl.offsetTop - 160 : firstOn ? firstOn.offsetTop - 50 : 0));
+        }
+        cal.addEventListener('scroll', function () { CAL.scroll = cal.scrollTop; }, { passive: true });
+      }
+    });
+
+    /* Gün ve hafta: saat ızgarası. Gün → hekim başına sütun; hafta → gün başına sütun */
+    function timeGrid(body, items, view, from, docs) {
+      var cols = view === 'gun'
+        ? docs.map(function (d) { return { key: 'd' + d.id, date: date, docs: [d], label: '<span class="dot" style="background:' + esc(d.color) + '"></span>' + esc(docName(d)) }; })
+        : Array.from({ length: 7 }, function (_, i) {
+          var dd = addDays(from, i);
+          return { key: dd, date: dd, docs: docs, day: true,
+            label: '<span class="dh__w">' + DSHORT[wdOf(dd)] + '</span><span class="dh__n' + (isToday(dd) ? ' is-today' : '') + (dd === date ? ' is-sel' : '') + '">' + dnum(dd) + '</span>' };
+        });
+      var colItems = function (c) {
+        return items.filter(function (a) { return a.start.slice(0, 10) === c.date && (view === 'hafta' || a.doctor_id === c.docs[0].id); });
+      };
+      // görünen saat aralığı: çalışma saatleri ve randevuları kapsasın
+      var lo = 8 * 60, hi = 19 * 60;
+      cols.forEach(function (c) {
+        c.docs.forEach(function (d) { (d.hours[wdOf(c.date)] || []).forEach(function (h) { lo = Math.min(lo, toMin(h[0])); hi = Math.max(hi, toMin(h[1])); }); });
+        colItems(c).forEach(function (a) { lo = Math.min(lo, toMin(a.start.slice(11))); hi = Math.max(hi, toMin(a.end.slice(11))); });
+      });
+      lo = Math.floor(lo / 60) * 60; hi = Math.ceil(hi / 60) * 60;
+      var STEP = 15, RH = view === 'gun' ? 26 : 20, rows = (hi - lo) / STEP;
+      var nowD = new Date(), nowM = nowD.getHours() * 60 + nowD.getMinutes();
+
+      var strip = '';
+      if (view === 'gun') {
+        var mon = mondayOf(date);
+        strip = '<div class="dstrip" role="tablist" aria-label="Haftanın günleri">' +
+          '<button type="button" class="btn btn--ghost btn--sm js-wprev" aria-label="Önceki hafta">' + ic('left') + '</button>' +
+          Array.from({ length: 7 }, function (_, i) {
+            var dd = addDays(mon, i);
+            return '<button type="button" role="tab" aria-selected="' + (dd === date) + '" class="dchip' + (dd === date ? ' is-sel' : '') + (isToday(dd) ? ' is-today' : '') + '" data-d="' + dd + '">' +
+              '<small>' + DSHORT[wdOf(dd)] + '</small><b>' + dnum(dd) + '</b></button>';
+          }).join('') +
+          '<button type="button" class="btn btn--ghost btn--sm js-wnext" aria-label="Sonraki hafta">' + ic('right') + '</button></div>';
+      }
+
+      var head = '<div class="cal__corner"></div>' + cols.map(function (c) {
+        var n = colItems(c).filter(function (a) { return a.status !== 'cancelled'; }).length;
+        return '<div class="cal__dh' + (c.day ? ' cal__dh--day js-dayhead' : '') + '" data-d="' + c.date + '">' + c.label + (n ? '<span class="badge">' + n + '</span>' : '') + '</div>';
       }).join('');
       var times = '<div class="cal__times">' + Array.from({ length: rows }, function (_, i) {
         var m = lo + i * STEP; return '<div>' + (m % 60 === 0 ? toHM(m) : '') + '</div>';
       }).join('') + '</div>';
-      var nowM = new Date().getHours() * 60 + new Date().getMinutes();
-      var cols = docs.map(function (d) {
-        var hrs = (d.hours[wd] || []).map(function (h) { return [toMin(h[0]), toMin(h[1])]; });
+      var grid = cols.map(function (c) {
+        var closed = closedSet.indexOf(c.date) >= 0, wd = wdOf(c.date);
+        var hrs = []; c.docs.forEach(function (d) { (d.hours[wd] || []).forEach(function (h) { hrs.push([toMin(h[0]), toMin(h[1])]); }); });
         var slots = Array.from({ length: rows }, function (_, i) {
           var m = lo + i * STEP, on = !closed && hrs.some(function (h) { return m >= h[0] && m < h[1]; });
-          return '<div class="cal__slot' + (m % 60 === 0 ? ' h' : '') + (on ? '' : ' off') + '" data-t="' + toHM(m) + '" data-d="' + d.id + '" title="' + toHM(m) + (on ? '' : ' — çalışma saati dışı') + '"></div>';
+          return '<div class="cal__slot' + (m % 60 === 0 ? ' h' : '') + (on ? '' : ' off') + '" data-t="' + toHM(m) + '" data-day="' + c.date + '"' +
+            (view === 'gun' ? ' data-doc="' + c.docs[0].id + '"' : '') + '></div>';
         }).join('');
-        var evs = r.items.filter(function (a) { return a.doctor_id === d.id; }).map(function (a) {
-          var s = toMin(a.start.slice(11)), e = toMin(a.end.slice(11));
-          return '<div class="ev is-' + a.status + '" data-id="' + a.id + '" style="--c:' + esc(a.doctor_color || '#888') + ';top:' + ((s - lo) / STEP * RH + 1) + 'px;height:' + Math.max(RH - 2, (e - s) / STEP * RH - 2) + 'px">' +
-            '<b>' + esc(a.patient_name) + '</b><small>' + a.start.slice(11, 16) + '–' + a.end.slice(11, 16) + ' · ' + esc(a.service_name || '') + (a.status === 'pending' ? ' · onay bekliyor' : '') + '</small></div>';
+        var list = colItems(c).map(function (a) { return { id: a.id, a: a, s: toMin(a.start.slice(11)), e: toMin(a.end.slice(11)) }; });
+        var L = lanes(list.filter(function (x) { return x.a.status !== 'cancelled'; }));
+        var evs = list.map(function (x) {
+          var a = x.a, ln = L[a.id] || { lane: 0, n: 1 }, w = 100 / ln.n;
+          var h = Math.max(RH - 2, (x.e - x.s) / STEP * RH - 2);
+          return '<div class="ev is-' + a.status + (h < 34 ? ' is-short' : '') + '" data-id="' + a.id + '" title="' + esc(a.start.slice(11, 16) + ' ' + a.patient_name + ' · ' + (a.service_name || '') + ' · ' + (a.doctor_title || '') + ' ' + (a.doctor_name || '')) + '" ' +
+            'style="--c:' + esc(a.doctor_color || '#888') + ';top:' + ((x.s - lo) / STEP * RH + 1) + 'px;height:' + h + 'px;left:calc(' + (ln.lane * w) + '% + 3px);width:calc(' + w + '% - 6px)">' +
+            '<b>' + esc(a.patient_name) + '</b><small>' + a.start.slice(11, 16) + (view === 'gun' ? '–' + a.end.slice(11, 16) + ' · ' + esc(a.service_name || '') : (CAL.doc ? '' : ' · ' + esc(a.doctor_name || ''))) +
+            (a.status === 'pending' ? ' · onay bekliyor' : '') + '</small></div>';
         }).join('');
-        var now = calDate === today() && nowM >= lo && nowM < hi ? '<div class="cal__now" style="top:' + ((nowM - lo) / STEP * RH) + 'px"></div>' : '';
-        return '<div class="cal__col">' + slots + evs + now + '</div>';
+        var now = isToday(c.date) && nowM >= lo && nowM < hi ? '<div class="cal__now" style="top:' + ((nowM - lo) / STEP * RH) + 'px"></div>' : '';
+        return '<div class="cal__col' + (isToday(c.date) && view === 'hafta' ? ' is-today' : '') + '">' + slots + evs + now + '</div>';
       }).join('');
 
-      v.innerHTML = top('Takvim', fmtDay(calDate) + (closed ? ' · <span class="badge st-cancelled">Klinik kapalı</span>' : ''),
-        '<button class="btn js-prev" aria-label="Önceki gün">' + ic('left') + '</button>' +
-        '<button class="btn js-today">Bugün</button>' +
-        '<button class="btn js-next" aria-label="Sonraki gün">' + ic('right') + '</button>' +
-        '<input type="date" class="js-date" value="' + calDate + '" style="width:auto">' +
-        '<select class="js-doc" style="width:auto"><option value="0">Tüm hekimler</option>' + activeDoctors().map(function (d) {
-          return '<option value="' + d.id + '"' + (d.id === calDoc ? ' selected' : '') + '>' + esc(docName(d)) + '</option>'; }).join('') + '</select>' +
-        '<button class="btn btn--p js-new">' + ic('plus') + 'Randevu</button>') +
-        (docs.length ? '<div class="card"><div class="cal" style="--rowh:' + RH + 'px;grid-template-columns:4rem repeat(' + docs.length + ', minmax(180px, 1fr))">' + head + times + cols + '</div></div>'
-          : '<div class="card"><p class="empty">Aktif hekim yok. ' + (isAdmin() ? '<a href="#/hekimler">Hekim ekleyin</a>.' : '') + '</p></div>') +
-        '<p class="mut" style="font-size:.85rem;margin-top:.8rem">Boş bir saate tıklayarak randevu ekleyin. Taralı alanlar hekimin çalışma saatleri dışındadır.</p>';
+      var minw = view === 'gun' ? 180 : 110;
+      body.innerHTML = strip + '<div class="card"><div class="cal cal--' + view + '" style="--rowh:' + RH + 'px;grid-template-columns:3.6rem repeat(' + cols.length + ', minmax(' + minw + 'px, 1fr))">' + head + times + grid + '</div></div>';
 
-      var go = function (d) { location.hash = '#/takvim/' + d; };
-      $('.js-prev', v).onclick = function () { go(addDays(calDate, -1)); };
-      $('.js-next', v).onclick = function () { go(addDays(calDate, 1)); };
-      $('.js-today', v).onclick = function () { go(today()); };
-      $('.js-date', v).onchange = function (e) { if (e.target.value) go(e.target.value); };
-      $('.js-doc', v).onchange = function (e) { calDoc = +e.target.value; route(); };
-      $('.js-new', v).onclick = function () { openAppt({ date: calDate, doctor_id: calDoc || undefined }); };
-      $$('.cal__slot', v).forEach(function (s) {
-        s.addEventListener('click', function () { openAppt({ date: calDate, time: s.dataset.t, doctor_id: +s.dataset.d }); });
+      $$('.dchip', body).forEach(function (b) { b.onclick = function () { calGo('gun', b.dataset.d, b.dataset.d > date ? 1 : -1); }; });
+      var wp = $('.js-wprev', body), wn = $('.js-wnext', body);
+      if (wp) wp.onclick = function () { calGo('gun', addDays(date, -7), -1); };
+      if (wn) wn.onclick = function () { calGo('gun', addDays(date, 7), 1); };
+      $$('.js-dayhead', body).forEach(function (h) { h.onclick = function () { calGo('gun', h.dataset.d); }; });
+      $$('.cal__slot', body).forEach(function (s) {
+        s.addEventListener('click', function () {
+          openAppt({ date: s.dataset.day, time: s.dataset.t, doctor_id: s.dataset.doc ? +s.dataset.doc : (CAL.doc || undefined) });
+        });
       });
-      $$('.ev', v).forEach(function (e) {
-        e.addEventListener('click', function () { openAppt(r.items.filter(function (a) { return a.id === +e.dataset.id; })[0]); });
+      $$('.ev', body).forEach(function (e) {
+        e.addEventListener('click', function () { openAppt(items.filter(function (a) { return a.id === +e.dataset.id; })[0]); });
       });
-      // ilk açılışta mesai başlangıcına kaydır
-      var cal = $('.cal', v), firstOn = $('.cal__slot:not(.off)', v);
-      if (cal && firstOn) cal.scrollTop = Math.max(0, firstOn.offsetTop - 60);
-    });
+    }
+
+    /* Ay: 6 hafta × 7 gün; hücrede ilk 3 randevu, fazlası “+n” */
+    function monthView(body, items, from, date) {
+      var byDay = {};
+      items.forEach(function (a) { var d = a.start.slice(0, 10); (byDay[d] = byDay[d] || []).push(a); });
+      var ym = date.slice(0, 7);
+      var html = '<div class="card mcal"><div class="mcal__head">' + [1, 2, 3, 4, 5, 6, 0].map(function (w) { return '<div>' + DSHORT[w] + '</div>'; }).join('') + '</div><div class="mcal__grid">';
+      for (var i = 0; i < 42; i++) {
+        var dd = addDays(from, i), list = (byDay[dd] || []).filter(function (a) { return a.status !== 'cancelled'; });
+        var other = dd.slice(0, 7) !== ym, closed = closedSet.indexOf(dd) >= 0;
+        html += '<div class="mcell' + (other ? ' is-other' : '') + (closed ? ' is-closed' : '') + (wdOf(dd) === 0 ? ' is-sun' : '') + '" data-d="' + dd + '" tabindex="0" role="button" aria-label="' +
+          esc(fmtDate(dd, { day: 'numeric', month: 'long', weekday: 'long' }) + ', ' + list.length + ' randevu') + '">' +
+          '<div class="mcell__top"><span class="mcell__n' + (isToday(dd) ? ' is-today' : '') + (dd === date ? ' is-sel' : '') + '">' + dnum(dd) + '</span>' +
+          (list.length ? '<span class="mcell__c">' + list.length + '</span>' : '') + '</div>' +
+          '<div class="mcell__evs">' + list.slice(0, 3).map(function (a) {
+            return '<button type="button" class="mev is-' + a.status + '" data-id="' + a.id + '" style="--c:' + esc(a.doctor_color || '#888') + '">' +
+              '<i></i><span class="mono">' + a.start.slice(11, 16) + '</span> ' + esc(a.patient_name) + '</button>';
+          }).join('') + (list.length > 3 ? '<span class="mmore">+' + (list.length - 3) + ' daha</span>' : '') + '</div>' +
+          '<div class="mcell__dots" aria-hidden="true">' + list.slice(0, 4).map(function (a) { return '<i style="background:' + esc(a.doctor_color || '#888') + '"></i>'; }).join('') + '</div></div>';
+      }
+      body.innerHTML = html + '</div></div>';
+      $$('.mcell', body).forEach(function (c) {
+        var open = function () { calGo('gun', c.dataset.d); };
+        c.addEventListener('click', function (e) { if (!e.target.closest('.mev')) open(); });
+        c.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+      });
+      $$('.mev', body).forEach(function (b) {
+        b.addEventListener('click', function () { openAppt(items.filter(function (a) { return a.id === +b.dataset.id; })[0]); });
+      });
+    }
   }
+
+  /* Kaydırma hareketi: dokunmatik ekranda yatay sürükleme, trackpad'de iki parmakla yatay kaydırma.
+     Izgara yatayda kaydırılabiliyorsa önce o kaydırılır; kenara gelince sonraki güne geçilir. */
+  function swipe(el) {
+    var sx = 0, sy = 0, t0 = 0, acc = 0, lock = 0;
+    var atEdge = function (dir) {
+      var c = $('.cal', el); if (!c || c.scrollWidth <= c.clientWidth + 2) return true;
+      return dir > 0 ? c.scrollLeft + c.clientWidth >= c.scrollWidth - 2 : c.scrollLeft <= 2;
+    };
+    el.addEventListener('touchstart', function (e) { var p = e.touches[0]; sx = p.clientX; sy = p.clientY; t0 = Date.now(); }, { passive: true });
+    el.addEventListener('touchend', function (e) {
+      var p = e.changedTouches[0], dx = p.clientX - sx, dy = p.clientY - sy;
+      if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.6 && Date.now() - t0 < 700 && atEdge(dx < 0 ? 1 : -1)) calShift(dx < 0 ? 1 : -1);
+    }, { passive: true });
+    el.addEventListener('wheel', function (e) {
+      if (Math.abs(e.deltaX) < Math.abs(e.deltaY) * 1.5 || Date.now() < lock) return;
+      var dir = e.deltaX > 0 ? 1 : -1;
+      if (!atEdge(dir)) { acc = 0; return; }
+      acc += e.deltaX;
+      if (Math.abs(acc) > 140) { acc = 0; lock = Date.now() + 900; calShift(dir); }
+    }, { passive: true });
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (!/^takvim/.test(current) || $('.modal') || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.target.closest && e.target.closest('input, select, textarea, [contenteditable="true"]')) return;
+    var k = e.key.toLocaleLowerCase('tr');
+    if (e.key === 'ArrowLeft') { e.preventDefault(); calShift(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); calShift(1); }
+    else if (k === 't') calGo(CAL.view, today());
+    else if (k === 'g') calGo('gun', CAL.date);
+    else if (k === 'h') calGo('hafta', CAL.date);
+    else if (k === 'a') calGo('ay', CAL.date);
+  });
 
   /* ── Randevu listesi ───────────────────────────────────────────────── */
   var apf = { from: today(), to: '', doctor: '', status: '', q: '' };

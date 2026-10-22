@@ -383,3 +383,80 @@ tr:hover .cell, .cell:focus { border-color: var(--line-2) !important; background
 .card__b.row > .f.grow { min-width: 200px; }
 .js-an .grid.g2 { align-items: start; }
 .cal__times div:first-child { transform: none; }
+
+/* ── Takvim: Gün / Hafta / Ay ── */
+.calhead { display: flex; align-items: flex-end; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.caltitle { font-size: 2rem; }
+.calsub { margin: .2rem 0 0; text-transform: capitalize; }
+.calctl { justify-content: flex-end; }
+.calhint { font-size: .82rem; margin-top: .8rem; }
+.calbody.slide-l { animation: calInL .28s var(--ease, ease-out); }
+.calbody.slide-r { animation: calInR .28s var(--ease, ease-out); }
+@keyframes calInL { from { opacity: .3; transform: translateX(26px); } to { opacity: 1; transform: none; } }
+@keyframes calInR { from { opacity: .3; transform: translateX(-26px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .calbody.slide-l, .calbody.slide-r { animation: none; } }
+
+.dstrip { display: flex; align-items: center; gap: .3rem; margin-bottom: .8rem; }
+.dchip { flex: 1; display: grid; justify-items: center; gap: .15rem; padding: .45rem 0; border: 0; border-radius: 12px; background: none; cursor: pointer; color: var(--fg); }
+.dchip small { font-size: .72rem; color: var(--mut); text-transform: uppercase; letter-spacing: .04em; }
+.dchip b { display: grid; place-items: center; width: 2.1rem; height: 2.1rem; border-radius: 50%; font: 600 1.05rem var(--sans); }
+.dchip:hover { background: var(--surface-2); }
+.dchip.is-today b { color: var(--danger); }
+.dchip.is-sel b { background: var(--fg); color: var(--bg); }
+.dchip.is-sel.is-today b { background: var(--danger); color: #fff; }
+
+.cal__dh--day { flex-direction: column; justify-content: center; gap: .1rem; cursor: pointer; padding: .45rem .3rem; }
+.cal__dh--day:hover { background: var(--surface-2); }
+.cal__dh--day .badge { position: absolute; right: .4rem; top: .45rem; font-size: .68rem; padding: .05rem .4rem; }
+.cal__dh { position: sticky; }
+.dh__w { font-size: .72rem; color: var(--mut); text-transform: uppercase; letter-spacing: .04em; }
+.dh__n { display: grid; place-items: center; width: 2rem; height: 2rem; border-radius: 50%; font: 600 1.05rem var(--sans); }
+.dh__n.is-today { background: var(--danger); color: #fff; }
+.dh__n.is-sel:not(.is-today) { box-shadow: inset 0 0 0 1.5px var(--fg); }
+.cal__col.is-today { background: color-mix(in srgb, var(--danger) 4%, transparent); }
+.cal--hafta .ev { padding: .15rem .35rem; font-size: .74rem; }
+.ev.is-short small { display: none; }
+.ev.is-short { padding-top: .1rem; padding-bottom: .1rem; }
+.cal__now::before { content: ""; position: absolute; left: -5px; top: -4px; width: 10px; height: 10px; border-radius: 50%; background: var(--danger); }
+
+.mcal { overflow: hidden; }
+.mcal__head { display: grid; grid-template-columns: repeat(7, 1fr); border-bottom: 1px solid var(--line); }
+.mcal__head div { padding: .55rem .7rem; font-size: .74rem; font-weight: 600; color: var(--mut); text-transform: uppercase; letter-spacing: .04em; text-align: right; }
+.mcal__grid { display: grid; grid-template-columns: repeat(7, 1fr); grid-auto-rows: minmax(118px, 1fr); }
+.mcell { position: relative; display: flex; flex-direction: column; gap: .25rem; min-width: 0; padding: .35rem .4rem .45rem; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); cursor: pointer; }
+.mcell:nth-child(7n) { border-right: 0; }
+.mcell:hover { background: var(--surface-2); }
+.mcell:focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; }
+.mcell.is-other { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
+.mcell.is-other .mcell__n { color: var(--mut); font-weight: 450; }
+.mcell.is-closed { background: repeating-linear-gradient(-45deg, transparent 0 6px, var(--surface-2) 6px 12px); }
+.mcell__top { display: flex; align-items: center; justify-content: space-between; flex-direction: row-reverse; }
+.mcell__n { display: grid; place-items: center; min-width: 1.9rem; height: 1.9rem; border-radius: 50%; font: 600 .95rem var(--sans); }
+.mcell__n.is-today { background: var(--danger); color: #fff; }
+.mcell__n.is-sel:not(.is-today) { box-shadow: inset 0 0 0 1.5px var(--fg); }
+.mcell__c { font-size: .7rem; color: var(--mut); font-weight: 600; }
+.mcell__evs { display: grid; gap: 2px; min-width: 0; }
+.mev { display: flex; align-items: center; gap: .3rem; min-width: 0; padding: .1rem .3rem; border: 0; border-radius: 4px; background: none; text-align: left; font-size: .76rem; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
+.mev i { flex: none; width: .45rem; height: .45rem; border-radius: 50%; background: var(--c); }
+.mev .mono { color: var(--mut); font-size: .72rem; }
+.mev:hover { background: color-mix(in srgb, var(--c) 16%, var(--surface)); }
+.mev.is-pending i { background: none; box-shadow: inset 0 0 0 1.5px var(--c); }
+.mev.is-noshow { text-decoration: line-through; opacity: .6; }
+.mmore { font-size: .72rem; color: var(--mut); padding-left: .3rem; }
+.mcell__dots { display: none; gap: 3px; justify-content: center; }
+.mcell__dots i { width: 6px; height: 6px; border-radius: 50%; }
+
+@media (max-width: 860px) {
+  .caltitle { font-size: 1.55rem; }
+  .calctl { justify-content: flex-start; width: 100%; }
+  .calctl .js-date { display: none; }
+  .mcal__grid { grid-auto-rows: 64px; }
+  .mcell__evs, .mcell__c { display: none; }
+  .mcell__top { justify-content: center; }
+  .mcell__dots { display: flex; }
+  .mcal__head div { text-align: center; padding: .5rem .2rem; }
+  .dchip b { width: 1.9rem; height: 1.9rem; font-size: .95rem; }
+  .dstrip .btn { display: none; }
+}
+.cal--hafta .cal__col { min-width: 0; }
+.cal .cal__col { overflow: hidden; }
