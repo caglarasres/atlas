@@ -11,7 +11,8 @@
       'meta.desc': 'Zirconia crowns, veneers, E-max, implants, root canal treatment, orthodontics and whitening in Kahramanmaraş, Türkiye. Explore each treatment in 3D and book a visit.',
       'skip': 'Skip to content',
       'brand.sub': 'Oral & Dental Health Clinic',
-      'nav.zr': 'Zirconia', 'nav.tx': 'Treatments', 'nav.process': 'Process', 'nav.reviews': 'Reviews', 'nav.contact': 'Contact',
+      'nav.zr': 'Zirconia', 'nav.tx': 'Treatments', 'nav.process': 'Process', 'nav.reviews': 'Reviews', 'nav.contact': 'Contact', 'nav.team': 'Dentists',
+      'team.label': '08 — Dentists', 'team.title': 'Your smile,<br><em>in good hands.</em>', 'team.lede': 'Meet the dentists who will look after you.',
       'phone.display': '+90 546 177 43 77',
       'cta.book': 'Book a visit', 'cta.call': 'Call',
 
@@ -135,7 +136,7 @@
       'f6.q': 'How many visits does it take?',
       'f6.a': 'It depends on the number of teeth and the condition of your mouth; it is usually completed in a few visits. Your individual plan becomes clear at the first examination.',
 
-      'k.label': '08 — Contact',
+      'k.label': '09 — Contact',
       'k.title': "Let's talk about<br><em>your smile.</em>",
       'k.addr.l': 'Address',
       'k.addr': 'Boğaziçi Mah., Bahçeci Hoca Bulvarı<br>Nurkent Sitesi altı No: 35A<br>46050 Onikişubat / Kahramanmaraş, Türkiye',
@@ -149,7 +150,15 @@
       'b.privacy': 'This form stores no data; your message opens in your own WhatsApp.',
       'ft.legal': 'The content of this site is for information only and does not replace diagnosis or treatment.',
       'ft.top': 'Back to top',
-      'wa.msg': 'Hello, this is {name}. I would like to book an appointment for: {tx}.'
+      'wa.msg': 'Hello, this is {name}. I would like to book an appointment for: {tx}.',
+      'b.phone': 'Mobile number', 'b.doctor': 'Dentist', 'b.anydoc': 'No preference', 'b.date': 'Date', 'b.time': 'Time',
+      'b.consent': 'I have read the privacy notice and agree to my personal data being processed for this appointment.',
+      'b.send2': 'Book appointment',
+      'b.privacy2': 'The clinic will confirm your appointment by phone. Your details are used only for your appointment and treatment.',
+      'bk.pick': 'Choose a date first.', 'bk.loading': 'Loading times…', 'bk.none': 'No free times on this day. Please try another date.',
+      'bk.e.name': 'Please enter your name.', 'bk.e.phone': 'Please enter a valid Turkish mobile number (05xx…).', 'bk.e.time': 'Please choose a date and time.',
+      'bk.e.consent': 'Please accept the privacy notice.', 'bk.e.net': 'Something went wrong. Please call us or try again.',
+      'bk.ok.t': 'Request received.', 'bk.ok.p': '{date}, {time} · {doctor} · {service}. We will call you to confirm.'
     },
 
     de: {
@@ -157,7 +166,8 @@
       'meta.desc': 'Zirkonkronen, Veneers, E-max, Implantate, Wurzelbehandlung, Kieferorthopädie und Bleaching in Kahramanmaraş, Türkei. Behandlungen in 3D ansehen und Termin vereinbaren.',
       'skip': 'Zum Inhalt springen',
       'brand.sub': 'Klinik für Zahn- und Mundgesundheit',
-      'nav.zr': 'Zirkon', 'nav.tx': 'Behandlungen', 'nav.process': 'Ablauf', 'nav.reviews': 'Bewertungen', 'nav.contact': 'Kontakt',
+      'nav.zr': 'Zirkon', 'nav.tx': 'Behandlungen', 'nav.process': 'Ablauf', 'nav.reviews': 'Bewertungen', 'nav.contact': 'Kontakt', 'nav.team': 'Zahnärzte',
+      'team.label': '08 — Zahnärzte', 'team.title': 'Ihr Lächeln<br><em>in guten Händen.</em>', 'team.lede': 'Lernen Sie die Zahnärztinnen und Zahnärzte kennen, die Sie behandeln.',
       'phone.display': '+90 546 177 43 77',
       'cta.book': 'Termin vereinbaren', 'cta.call': 'Anrufen',
 
@@ -281,7 +291,7 @@
       'f6.q': 'Wie viele Sitzungen sind nötig?',
       'f6.a': 'Das hängt von der Zahl der Zähne und dem Zustand Ihres Mundes ab; meist sind es wenige Sitzungen. Ihr persönlicher Plan steht nach der ersten Untersuchung fest.',
 
-      'k.label': '08 — Kontakt',
+      'k.label': '09 — Kontakt',
       'k.title': 'Sprechen wir über<br><em>Ihr Lächeln.</em>',
       'k.addr.l': 'Adresse',
       'k.addr': 'Boğaziçi Mah., Bahçeci Hoca Bulvarı<br>Nurkent Sitesi altı No: 35A<br>46050 Onikişubat / Kahramanmaraş, Türkei',
@@ -295,14 +305,30 @@
       'b.privacy': 'Dieses Formular speichert keine Daten; Ihre Nachricht öffnet sich in Ihrem eigenen WhatsApp.',
       'ft.legal': 'Die Inhalte dieser Website dienen der Information und ersetzen weder Diagnose noch Behandlung.',
       'ft.top': 'Nach oben',
-      'wa.msg': 'Guten Tag, hier ist {name}. Ich möchte einen Termin vereinbaren für: {tx}.'
+      'wa.msg': 'Guten Tag, hier ist {name}. Ich möchte einen Termin vereinbaren für: {tx}.',
+      'b.phone': 'Handynummer', 'b.doctor': 'Zahnärztin / Zahnarzt', 'b.anydoc': 'Egal', 'b.date': 'Datum', 'b.time': 'Uhrzeit',
+      'b.consent': 'Ich habe die Datenschutzhinweise gelesen und stimme der Verarbeitung meiner Daten für diesen Termin zu.',
+      'b.send2': 'Termin anfragen',
+      'b.privacy2': 'Die Praxis bestätigt Ihren Termin telefonisch. Ihre Daten werden nur für Termin und Behandlung verwendet.',
+      'bk.pick': 'Bitte zuerst ein Datum wählen.', 'bk.loading': 'Zeiten werden geladen…', 'bk.none': 'An diesem Tag ist nichts frei. Bitte ein anderes Datum wählen.',
+      'bk.e.name': 'Bitte geben Sie Ihren Namen ein.', 'bk.e.phone': 'Bitte eine gültige türkische Handynummer eingeben (05xx…).', 'bk.e.time': 'Bitte Datum und Uhrzeit wählen.',
+      'bk.e.consent': 'Bitte bestätigen Sie die Datenschutzhinweise.', 'bk.e.net': 'Etwas ist schiefgelaufen. Bitte rufen Sie uns an oder versuchen Sie es erneut.',
+      'bk.ok.t': 'Anfrage erhalten.', 'bk.ok.p': '{date}, {time} · {doctor} · {service}. Wir rufen Sie zur Bestätigung an.'
     }
   };
 
   /* Yalnızca JavaScript'in kullandığı Türkçe metinler */
   var TR_JS = {
-    'wa.msg': 'Merhaba, ben {name}. Şu tedavi için randevu almak istiyorum: {tx}.'
+    'wa.msg': 'Merhaba, ben {name}. Şu tedavi için randevu almak istiyorum: {tx}.',
+    'bk.pick': 'Önce bir tarih seçin.', 'bk.loading': 'Saatler yükleniyor…', 'bk.none': 'Bu günde boş saat yok. Lütfen başka bir gün seçin.',
+    'bk.e.name': 'Lütfen adınızı yazın.', 'bk.e.phone': 'Lütfen geçerli bir cep telefonu girin (05xx…).', 'bk.e.time': 'Lütfen tarih ve saat seçin.',
+    'bk.e.consent': 'Lütfen aydınlatma metnini onaylayın.', 'bk.e.net': 'Bir sorun oluştu. Lütfen bizi arayın ya da tekrar deneyin.',
+    'bk.ok.t': 'Talebiniz alındı.', 'bk.ok.p': '{date}, {time} · {doctor} · {service}. Teyit için sizi arayacağız.'
   };
+
+  // yönetim paneli metin düzenleyicisi varsayılanları buradan okur
+  window.AtlasDict = { en: DICT.en, de: DICT.de, trJs: TR_JS };
+  if (!document.querySelector('[data-i18n]')) return;
 
   var SUPPORTED = ['tr', 'en', 'de'];
   var doc = document;
@@ -363,6 +389,19 @@
 
   capture();
 
+  /* Panelde değiştirilen metinler (sunucu sayfaya window.ATLAS olarak gömer) */
+  var A = window.ATLAS, touched = false;
+  if (A && A.content) {
+    ['en', 'de'].forEach(function (l) { Object.assign(DICT[l], A.content[l] || {}); });
+    Object.assign(tr, A.content.tr || {});
+    touched = Object.keys(A.content.tr || {}).length > 0;
+  }
+  if (A && A.clinic && A.clinic.phone) {
+    tr['phone.display'] = A.clinic.phone;
+    ['en', 'de'].forEach(function (l) { if (!(A.content && A.content[l] && A.content[l]['phone.display'])) DICT[l]['phone.display'] = A.clinic.phone; });
+    touched = true;
+  }
+
   var initial = 'tr';
   try {
     var q = new URLSearchParams(location.search).get('lang');
@@ -370,7 +409,7 @@
     if (q && SUPPORTED.indexOf(q) >= 0) initial = q;
     else if (saved && SUPPORTED.indexOf(saved) >= 0) initial = saved;
   } catch (e) {}
-  if (initial !== 'tr') apply(initial);
+  if (initial !== 'tr' || touched) apply(initial);
 
   window.AtlasI18n = { t: t, set: set, get lang() { return current; } };
 })();

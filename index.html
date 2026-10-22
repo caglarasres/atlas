@@ -62,6 +62,7 @@
     <a href="#tedaviler" data-i18n="nav.tx">Tedaviler</a>
     <a href="#surec" data-i18n="nav.process">Süreç</a>
     <a href="#yorumlar" data-i18n="nav.reviews">Yorumlar</a>
+    <a href="#hekimler" data-i18n="nav.team" data-team hidden>Hekimler</a>
     <a href="#iletisim" data-i18n="nav.contact">İletişim</a>
   </nav>
   <div class="hdr__end">
@@ -86,7 +87,8 @@
     <a href="#tedaviler"><small>02</small><span data-i18n="nav.tx">Tedaviler</span></a>
     <a href="#surec"><small>03</small><span data-i18n="nav.process">Süreç</span></a>
     <a href="#yorumlar"><small>04</small><span data-i18n="nav.reviews">Yorumlar</span></a>
-    <a href="#iletisim"><small>05</small><span data-i18n="nav.contact">İletişim</span></a>
+    <a href="#hekimler" data-team hidden><small>05</small><span data-i18n="nav.team">Hekimler</span></a>
+    <a href="#iletisim"><small>06</small><span data-i18n="nav.contact">İletişim</span></a>
   </nav>
   <div class="menu__foot">
     <a class="menu__tel" href="tel:+905461774377" data-i18n="phone.display">0546 177 43 77</a>
@@ -467,10 +469,20 @@
   </div>
 </section>
 
-<!-- ═══ 08 İletişim ═══ -->
+<!-- ═══ 08 Hekimler — panelden yönetilir; sunucu kartları buraya yerleştirir ═══ -->
+<section class="sec team" id="hekimler" data-theme="paper" data-team hidden>
+  <header class="sec__head">
+    <p class="label" data-reveal data-i18n="team.label">08 — Hekimler</p>
+    <h2 data-split data-i18n="team.title">Gülüşünüz<br><em>emin ellerde.</em></h2>
+    <p class="lede" data-reveal style="--d:.2s" data-i18n="team.lede">Sizinle ilgilenecek hekimlerimizle tanışın.</p>
+  </header>
+  <div class="team__grid" data-team-grid></div>
+</section>
+
+<!-- ═══ 09 İletişim ═══ -->
 <section class="sec contact" id="iletisim" data-theme="ink">
   <header class="sec__head">
-    <p class="label" data-reveal data-i18n="k.label">08 — İletişim</p>
+    <p class="label" data-reveal data-i18n="k.label">09 — İletişim</p>
     <h2 data-split data-i18n="k.title">Gülüşünüzü<br><em>konuşalım.</em></h2>
   </header>
 
@@ -527,15 +539,41 @@
           <option value="genel" data-i18n="b.general">Genel muayene</option>
         </select>
       </label>
+      <label class="field field--online">
+        <span data-i18n="b.phone">Cep telefonunuz</span>
+        <input type="tel" name="phone" autocomplete="tel" inputmode="tel" placeholder="05xx xxx xx xx">
+      </label>
+      <div class="form__row field--online">
+        <label class="field">
+          <span data-i18n="b.doctor">Hekim</span>
+          <select name="doctor"><option value="" data-i18n="b.anydoc">Fark etmez</option></select>
+        </label>
+        <label class="field">
+          <span data-i18n="b.date">Tarih</span>
+          <input type="date" name="date">
+        </label>
+      </div>
+      <div class="field field--online" role="group" aria-labelledby="b-time">
+        <span id="b-time" data-i18n="b.time">Saat</span>
+        <div class="tslots" data-empty></div>
+      </div>
       <label class="field">
         <span data-i18n="b.note">Notunuz (isteğe bağlı)</span>
         <textarea name="note" rows="3"></textarea>
       </label>
+      <label class="consent field--online">
+        <input type="checkbox" name="consent">
+        <span data-i18n="b.consent">Kişisel verilerimin randevu için işlenmesine ilişkin aydınlatma metnini okudum, onaylıyorum.</span>
+      </label>
+      <input type="text" name="website" tabindex="-1" autocomplete="off" class="hp" aria-hidden="true">
+      <p class="form__msg" role="status" hidden></p>
       <button class="btn btn--solid form__send" type="submit">
-        <span data-i18n="b.send">WhatsApp ile gönder</span>
+        <span class="when-wa" data-i18n="b.send">WhatsApp ile gönder</span>
+        <span class="when-online" data-i18n="b.send2">Randevuyu oluştur</span>
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 8h11M9 3.5 13.5 8 9 12.5"/></svg>
       </button>
-      <p class="note" data-i18n="b.privacy">Bu form hiçbir veri kaydetmez; mesajınız kendi WhatsApp uygulamanızda açılır.</p>
+      <p class="note when-wa" data-i18n="b.privacy">Bu form hiçbir veri kaydetmez; mesajınız kendi WhatsApp uygulamanızda açılır.</p>
+      <p class="note when-online" data-i18n="b.privacy2">Randevunuz klinik tarafından telefonla teyit edilir. Bilgileriniz yalnızca randevu ve tedavi süreciniz için kullanılır.</p>
     </form>
   </div>
 </section>

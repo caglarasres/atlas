@@ -418,28 +418,133 @@
     });
   });
 
-  /* ── Randevu formu → WhatsApp ────────────────────────────────────── */
+  /* ── Randevu formu ───────────────────────────────────────────────────
+     Sunucu üzerinden açıldıysa (window.ATLAS) online randevu: boş saatler
+     canlı gelir, talep panele düşer. Statik barındırmada WhatsApp'a gider. */
+  var ATLAS = window.ATLAS || null;
+  var WA = (ATLAS && ATLAS.clinic && ATLAS.clinic.wa) || '905461774377';
+  if (ATLAS && ATLAS.clinic) {
+    $$('a[href^="tel:"]').forEach(function (a) { a.href = 'tel:' + ATLAS.clinic.tel; });
+    $$('a[href^="https://wa.me/"]').forEach(function (a) { a.href = 'https://wa.me/' + WA; });
+  }
+
   if (form) {
+    var online = !!(ATLAS && ATLAS.booking), cfg = null, picked = '';
+    var slotBox = $('.tslots', form), msg = $('.form__msg', form), sendBtn = $('.form__send', form);
+    var showMsg = function (html, kind) { msg.innerHTML = html; msg.className = 'form__msg' + (kind ? ' is-' + kind : ''); msg.hidden = !html; };
+    var bad = function (el, on) { var f = el.closest('.field, .consent'); if (f) f.classList.toggle('is-bad', on); };
+    var escH = function (s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+
+    var serviceId = function () {
+      var o = form.tx.options[form.tx.selectedIndex];
+      return o ? Number(o.getAttribute('data-sid')) : 0;
+    };
+
+    function loadSlots() {
+      picked = '';
+      if (!form.date.value) { slotBox.innerHTML = '<p>' + I18N.t('bk.pick') + '</p>'; return; }
+      slotBox.innerHTML = '<p>' + I18N.t('bk.loading') + '</p>';
+      var q = '?date=' + form.date.value + '&service=' + serviceId() + (form.doctor.value ? '&doctor=' + form.doctor.value : '');
+      fetch(ATLAS.api + '/slots' + q).then(function (r) { return r.json(); }).then(function (r) {
+        var list = r.slots || [];
+        slotBox.innerHTML = list.length ? list.map(function (t) { return '<button type="button" aria-pressed="false">' + t + '</button>'; }).join('')
+          : '<p>' + I18N.t('bk.none') + '</p>';
+        $$('button', slotBox).forEach(function (b) {
+          b.addEventListener('click', function () {
+            picked = b.textContent;
+            $$('button', slotBox).forEach(function (x) { x.setAttribute('aria-pressed', String(x === b)); });
+            bad(slotBox, false);
+          });
+        });
+      }).catch(function () { slotBox.innerHTML = '<p>' + I18N.t('bk.e.net') + '</p>'; });
+    }
+
+    if (online) {
+      fetch(ATLAS.api + '/config').then(function (r) { return r.json(); }).then(function (c) {
+        cfg = c;
+        if (!c.booking.enabled || !c.services.length || !c.doctors.length) return;
+        // sabit seçenekleri hizmetlerle eşle; olmayanları gizle, panelde eklenenleri ekle
+        var byKey = {};
+        c.services.forEach(function (sv) { byKey[sv.key] = sv; });
+        $$('option', form.tx).forEach(function (o) {
+          var sv = byKey[o.value];
+          if (sv) { o.setAttribute('data-sid', sv.id); delete byKey[o.value]; } else o.remove();
+        });
+        Object.keys(byKey).forEach(function (k) {
+          var o = doc.createElement('option'); o.value = k; o.textContent = byKey[k].name; o.setAttribute('data-sid', byKey[k].id);
+          form.tx.appendChild(o);
+        });
+        c.doctors.forEach(function (d) {
+          var o = doc.createElement('option'); o.value = d.id; o.textContent = d.name; form.doctor.appendChild(o);
+        });
+        form.date.min = c.booking.today;
+        var mx = new Date(c.booking.today + 'T12:00:00'); mx.setDate(mx.getDate() + c.booking.days);
+        form.date.max = mx.toISOString().slice(0, 10);
+        form.classList.add('is-online');
+        loadSlots();
+        ['tx', 'doctor', 'date'].forEach(function (n) { form[n].addEventListener('change', loadSlots); });
+      }).catch(function () {});
+    }
+
     form.addEventListener('submit', function (e) {
       e.preventDefault();
       var name = form.name.value.trim();
-      var field = form.name.closest('.field');
-      field.classList.toggle('is-bad', !name);
+      bad(form.name, !name);
       if (!name) { form.name.focus(); return; }
-      var tx = form.tx.options[form.tx.selectedIndex].textContent.trim();
-      var msg = I18N.t('wa.msg').replace('{name}', name).replace('{tx}', tx);
-      var note = form.note.value.trim();
-      if (note) msg += '\n' + note;
-      window.open('https://wa.me/905461774377?text=' + encodeURIComponent(msg), '_blank', 'noopener');
+
+      if (!form.classList.contains('is-online')) {
+        var tx = form.tx.options[form.tx.selectedIndex].textContent.trim();
+        var text = I18N.t('wa.msg').replace('{name}', name).replace('{tx}', tx);
+        var note = form.note.value.trim();
+        if (note) text += '\n' + note;
+        window.open('https://wa.me/' + WA + '?text=' + encodeURIComponent(text), '_blank', 'noopener');
+        return;
+      }
+
+      var phone = form.phone.value.replace(/\D/g, '').slice(-10);
+      var err = '';
+      if (!/^5\d{9}$/.test(phone)) { err = 'bk.e.phone'; bad(form.phone, true); form.phone.focus(); }
+      else if (!form.date.value || !picked) { err = 'bk.e.time'; bad(slotBox, true); }
+      else if (!form.consent.checked) { err = 'bk.e.consent'; bad(form.consent, true); }
+      if (err) { showMsg(I18N.t(err), 'err'); return; }
+
+      sendBtn.disabled = true; showMsg('');
+      fetch(ATLAS.api + '/book', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: name, phone: '0' + phone, service: serviceId(), doctor: form.doctor.value ? Number(form.doctor.value) : null,
+          date: form.date.value, time: picked, note: form.note.value.trim(), consent: true, website: form.website.value
+        })
+      }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); }).then(function (res) {
+        sendBtn.disabled = false;
+        if (!res.ok) { showMsg(escH(res.j.error || I18N.t('bk.e.net')), 'err'); if (res.j.error) loadSlots(); return; }
+        var d = new Date(res.j.date + 'T12:00:00').toLocaleDateString(I18N.lang === 'tr' ? 'tr-TR' : I18N.lang, { weekday: 'long', day: 'numeric', month: 'long' });
+        showMsg('<b>' + I18N.t('bk.ok.t') + '</b>' + escH(I18N.t('bk.ok.p').replace('{date}', d).replace('{time}', res.j.time)
+          .replace('{doctor}', res.j.doctor).replace('{service}', res.j.service || '')), 'ok');
+        form.note.value = ''; form.consent.checked = false;
+        loadSlots();
+      }).catch(function () { sendBtn.disabled = false; showMsg(I18N.t('bk.e.net'), 'err'); });
     });
-    form.name.addEventListener('input', function () { form.name.closest('.field').classList.remove('is-bad'); });
+    ['name', 'phone', 'consent'].forEach(function (n) {
+      if (form[n]) form[n].addEventListener('input', function () { bad(form[n], false); });
+    });
+    if (form.consent) form.consent.addEventListener('change', function () { bad(form.consent, false); });
   }
 
   var yearEl = $('#year');
   if (yearEl) yearEl.textContent = String(new Date().getFullYear());
 
   /* ── Dil değişince ───────────────────────────────────────────────── */
+  /* hekim biyografileri: sunucu üç dili de öznitelik olarak verir */
+  function bios() {
+    $$('[data-bio-tr]').forEach(function (p) {
+      p.textContent = p.getAttribute('data-bio-' + I18N.lang) || p.getAttribute('data-bio-tr');
+    });
+  }
+  if (I18N.lang !== 'tr') bios();
+
   doc.addEventListener('atlas:lang', function () {
+    bios();
     $$('[data-split]').forEach(split);
     buildTicker();
     if (rail) rail.scrollLeft = 0;
