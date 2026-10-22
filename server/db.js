@@ -1,33 +1,104 @@
 /* Atlas — veritabanı.
-   Node'un yerleşik SQLite'ı (node:sqlite); harici paket yok.
-   Tüm saatler klinik saatiyle (Europe/Istanbul) 'YYYY-MM-DD HH:MM' metni olarak tutulur. */
+   Yerelde Node'un yerleşik SQLite'ı (data/atlas.db); Vercel'de Turso (uzak, SQLite uyumlu).
+   TURSO_DATABASE_URL tanımlıysa Turso kullanılır. Arayüz her iki durumda da aynıdır ve asenkrondur:
+     await q.get(sql, ...args)  → ilk satır | undefined
+     await q.all(sql, ...args)  → satırlar
+     await q.run(sql, ...args)  → { lastInsertRowid, changes }
+     await q.tx(async (t) => …) → t aynı arayüz, tek işlem (transaction) içinde
+     await q.batch([[sql, args], …]) → toplu yazma (örnek veri)
+   Tüm saatler klinik saatiyle (Europe/Istanbul) 'YYYY-MM-DD HH:MM' metni olarak tutulur.
+   Uzak bağlantıda yabancı anahtar zincirlemesine güvenilmez; silmeler kodda açıkça yapılır. */
 'use strict';
 
-const fs = require('node:fs');
 const path = require('node:path');
-const { DatabaseSync } = require('node:sqlite');
 
+const REMOTE = !!process.env.TURSO_DATABASE_URL;
 const DATA_DIR = process.env.ATLAS_DATA || path.join(__dirname, '..', 'data');
-fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const db = new DatabaseSync(path.join(DATA_DIR, 'atlas.db'));
-db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000;');
+/* ── Bağlantı ──────────────────────────────────────────────────────── */
+function plain(res) {
+  const cols = res.columns;
+  return res.rows.map((r) => { const o = {}; cols.forEach((c, i) => { o[c] = r[i]; }); return o; });
+}
+function wrapRemote(ex) {
+  const exec = (sql, args) => ex.execute({ sql, args: args.map((a) => (a === undefined ? null : a)) });
+  return {
+    get: async (sql, ...a) => plain(await exec(sql, a))[0],
+    all: async (sql, ...a) => plain(await exec(sql, a)),
+    run: async (sql, ...a) => { const r = await exec(sql, a); return { lastInsertRowid: Number(r.lastInsertRowid || 0), changes: r.rowsAffected }; }
+  };
+}
+function wrapLocal(d) {
+  const norm = (a) => a.map((x) => (x === undefined ? null : typeof x === 'boolean' ? Number(x) : x));
+  return {
+    get: async (sql, ...a) => d.prepare(sql).get(...norm(a)),
+    all: async (sql, ...a) => d.prepare(sql).all(...norm(a)),
+    run: async (sql, ...a) => { const r = d.prepare(sql).run(...norm(a)); return { lastInsertRowid: Number(r.lastInsertRowid), changes: r.changes }; }
+  };
+}
 
-db.exec(`
+let q;
+if (REMOTE) {
+  const { createClient } = require('@libsql/client/web');
+  const client = createClient({ url: process.env.TURSO_DATABASE_URL, authToken: process.env.TURSO_AUTH_TOKEN });
+  q = wrapRemote(client);
+  q.exec = (sql) => client.executeMultiple(sql);
+  q.tx = async (fn) => {
+    const t = await client.transaction('write');
+    try { const r = await fn(wrapRemote(t)); await t.commit(); return r; }
+    catch (e) { try { await t.rollback(); } catch {} throw e; }
+    finally { t.close(); }
+  };
+  q.batch = async (stmts) => {
+    for (let i = 0; i < stmts.length; i += 400) {
+      await client.batch(stmts.slice(i, i + 400).map(([sql, args]) => ({ sql, args: args.map((a) => (a === undefined ? null : a)) })), 'write');
+    }
+  };
+} else {
+  const fs = require('node:fs');
+  const { DatabaseSync } = require('node:sqlite');
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const d = new DatabaseSync(path.join(DATA_DIR, 'atlas.db'));
+  d.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000;');
+  q = wrapLocal(d);
+  q.exec = async (sql) => d.exec(sql);
+  // tek bağlantı: işlem içindeki adımlar araya başka istek girmeden sırayla çalışır
+  let chain = Promise.resolve();
+  q.tx = (fn) => {
+    const run = chain.then(async () => {
+      d.exec('BEGIN IMMEDIATE');
+      try { const r = await fn(q); d.exec('COMMIT'); return r; }
+      catch (e) { d.exec('ROLLBACK'); throw e; }
+    });
+    chain = run.catch(() => {});
+    return run;
+  };
+  q.batch = async (stmts) => q.tx(async () => { for (const [sql, args] of stmts) d.prepare(sql).run(...wrapArgs(args)); });
+  const wrapArgs = (a) => a.map((x) => (x === undefined ? null : typeof x === 'boolean' ? Number(x) : x));
+}
+
+/* ── Şema ──────────────────────────────────────────────────────────── */
+const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
   email TEXT NOT NULL UNIQUE COLLATE NOCASE,
   pass_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'staff' CHECK (role IN ('admin','staff','doctor')),
-  doctor_id INTEGER REFERENCES doctors(id) ON DELETE SET NULL,
+  doctor_id INTEGER,
   active INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  totp_secret TEXT NOT NULL DEFAULT '',
+  totp_enabled INTEGER NOT NULL DEFAULT 0,
+  totp_last INTEGER NOT NULL DEFAULT 0,
+  last_login TEXT
 );
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  expires_at INTEGER NOT NULL
+  user_id INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL DEFAULT 0,
+  ip TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS doctors (
   id INTEGER PRIMARY KEY,
@@ -39,7 +110,12 @@ CREATE TABLE IF NOT EXISTS doctors (
   hours TEXT NOT NULL DEFAULT '{}',
   online INTEGER NOT NULL DEFAULT 1,
   active INTEGER NOT NULL DEFAULT 1,
-  sort INTEGER NOT NULL DEFAULT 0
+  sort INTEGER NOT NULL DEFAULT 0,
+  bio TEXT NOT NULL DEFAULT '',
+  bio_en TEXT NOT NULL DEFAULT '',
+  bio_de TEXT NOT NULL DEFAULT '',
+  photo TEXT NOT NULL DEFAULT '',
+  on_site INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS services (
   id INTEGER PRIMARY KEY,
@@ -49,7 +125,8 @@ CREATE TABLE IF NOT EXISTS services (
   price INTEGER,
   online INTEGER NOT NULL DEFAULT 1,
   active INTEGER NOT NULL DEFAULT 1,
-  sort INTEGER NOT NULL DEFAULT 0
+  sort INTEGER NOT NULL DEFAULT 0,
+  cost INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS patients (
   id INTEGER PRIMARY KEY,
@@ -66,9 +143,9 @@ CREATE TABLE IF NOT EXISTS patients (
 CREATE INDEX IF NOT EXISTS patients_phone ON patients(phone);
 CREATE TABLE IF NOT EXISTS appointments (
   id INTEGER PRIMARY KEY,
-  patient_id INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
-  doctor_id INTEGER REFERENCES doctors(id) ON DELETE SET NULL,
-  service_id INTEGER REFERENCES services(id) ON DELETE SET NULL,
+  patient_id INTEGER NOT NULL,
+  doctor_id INTEGER,
+  service_id INTEGER,
   start TEXT NOT NULL,
   end TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending'
@@ -83,17 +160,20 @@ CREATE INDEX IF NOT EXISTS appts_doctor ON appointments(doctor_id, start);
 CREATE INDEX IF NOT EXISTS appts_patient ON appointments(patient_id);
 CREATE TABLE IF NOT EXISTS records (
   id INTEGER PRIMARY KEY,
-  patient_id INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
-  doctor_id INTEGER REFERENCES doctors(id) ON DELETE SET NULL,
+  patient_id INTEGER NOT NULL,
+  doctor_id INTEGER,
   date TEXT NOT NULL,
   tooth TEXT NOT NULL DEFAULT '',
   procedure TEXT NOT NULL,
   note TEXT NOT NULL DEFAULT '',
   fee INTEGER NOT NULL DEFAULT 0,
   paid INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  service_id INTEGER,
+  cost INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS records_patient ON records(patient_id);
+CREATE INDEX IF NOT EXISTS records_date ON records(date);
 CREATE TABLE IF NOT EXISTS content (
   lang TEXT NOT NULL,
   key TEXT NOT NULL,
@@ -114,13 +194,7 @@ CREATE TABLE IF NOT EXISTS audit (
   detail TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS audit_at ON audit(at);
-`);
-
-/* ── Sonradan eklenen sütunlar (var olan veritabanlarını yükseltir) ── */
-function addColumn(table, col, def) {
-  if (!db.prepare('PRAGMA table_info(' + table + ')').all().some((c) => c.name === col)) db.exec('ALTER TABLE ' + table + ' ADD COLUMN ' + col + ' ' + def);
-}
-db.exec(`CREATE TABLE IF NOT EXISTS expenses (
+CREATE TABLE IF NOT EXISTS expenses (
   id INTEGER PRIMARY KEY,
   date TEXT NOT NULL,
   category TEXT NOT NULL,
@@ -129,24 +203,34 @@ db.exec(`CREATE TABLE IF NOT EXISTS expenses (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS expenses_date ON expenses(date);
-CREATE INDEX IF NOT EXISTS records_date ON records(date);`);
-addColumn('services', 'cost', 'INTEGER NOT NULL DEFAULT 0');       // malzeme + laboratuvar maliyeti (₺)
-addColumn('records', 'service_id', 'INTEGER REFERENCES services(id) ON DELETE SET NULL');
-addColumn('records', 'cost', 'INTEGER NOT NULL DEFAULT 0');
-addColumn('doctors', 'bio', "TEXT NOT NULL DEFAULT ''");
-addColumn('doctors', 'bio_en', "TEXT NOT NULL DEFAULT ''");
-addColumn('doctors', 'bio_de', "TEXT NOT NULL DEFAULT ''");
-addColumn('doctors', 'photo', "TEXT NOT NULL DEFAULT ''");
-addColumn('doctors', 'on_site', 'INTEGER NOT NULL DEFAULT 1');
-addColumn('users', 'totp_secret', "TEXT NOT NULL DEFAULT ''");
-addColumn('users', 'totp_enabled', 'INTEGER NOT NULL DEFAULT 0');
-addColumn('users', 'totp_last', 'INTEGER NOT NULL DEFAULT 0');
-addColumn('users', 'last_login', 'TEXT');
-addColumn('sessions', 'last_seen', 'INTEGER NOT NULL DEFAULT 0');
-addColumn('sessions', 'ip', "TEXT NOT NULL DEFAULT ''");
+CREATE TABLE IF NOT EXISTS files (
+  name TEXT PRIMARY KEY,
+  mime TEXT NOT NULL,
+  data BLOB NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS mfa_tickets (
+  hash TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  tries INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS rate_limits (
+  key TEXT PRIMARY KEY,
+  n INTEGER NOT NULL,
+  reset_at INTEGER NOT NULL
+);
+`;
 
-const UPLOADS = path.join(DATA_DIR, 'uploads');
-fs.mkdirSync(path.join(UPLOADS, 'doctors'), { recursive: true });
+/* Önceki sürümlerden kalan yerel veritabanlarını yükseltir */
+const COLUMNS = [
+  ['doctors', 'bio', "TEXT NOT NULL DEFAULT ''"], ['doctors', 'bio_en', "TEXT NOT NULL DEFAULT ''"], ['doctors', 'bio_de', "TEXT NOT NULL DEFAULT ''"],
+  ['doctors', 'photo', "TEXT NOT NULL DEFAULT ''"], ['doctors', 'on_site', 'INTEGER NOT NULL DEFAULT 1'],
+  ['users', 'totp_secret', "TEXT NOT NULL DEFAULT ''"], ['users', 'totp_enabled', 'INTEGER NOT NULL DEFAULT 0'],
+  ['users', 'totp_last', 'INTEGER NOT NULL DEFAULT 0'], ['users', 'last_login', 'TEXT'],
+  ['sessions', 'last_seen', 'INTEGER NOT NULL DEFAULT 0'], ['sessions', 'ip', "TEXT NOT NULL DEFAULT ''"],
+  ['services', 'cost', 'INTEGER NOT NULL DEFAULT 0'], ['records', 'service_id', 'INTEGER'], ['records', 'cost', 'INTEGER NOT NULL DEFAULT 0']
+];
 
 /* ── Varsayılanlar ─────────────────────────────────────────────────── */
 const DEFAULT_SETTINGS = {
@@ -171,38 +255,53 @@ const DEFAULT_SERVICES = [
   ['diseti', 'Dişeti tedavisi', 45], ['botoks', 'Botoks', 30]
 ];
 
-function initDefaults() {
-  const ins = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
-  for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) ins.run(k, JSON.stringify(v));
-
-  if (db.prepare('SELECT COUNT(*) n FROM services').get().n === 0) {
-    const s = db.prepare('INSERT INTO services (key, name, duration_min, sort) VALUES (?, ?, ?, ?)');
-    DEFAULT_SERVICES.forEach((r, i) => s.run(r[0], r[1], r[2], i));
-  }
+/* Şemayı kur, eski veritabanını yükselt, varsayılanları ekle; süreç başına bir kez */
+let readyP = null;
+function ready() {
+  if (!readyP) readyP = (async () => {
+    await q.exec(SCHEMA);
+    const have = {};
+    for (const [t, c, def] of COLUMNS) {
+      if (!have[t]) have[t] = (await q.all('PRAGMA table_info(' + t + ')')).map((x) => x.name);
+      if (!have[t].includes(c)) { await q.exec('ALTER TABLE ' + t + ' ADD COLUMN ' + c + ' ' + def); have[t].push(c); }
+    }
+    for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) await q.run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', k, JSON.stringify(v));
+    if ((await q.get('SELECT COUNT(*) n FROM services')).n === 0) {
+      for (let i = 0; i < DEFAULT_SERVICES.length; i++) {
+        const r = DEFAULT_SERVICES[i];
+        await q.run('INSERT INTO services (key, name, duration_min, sort) VALUES (?, ?, ?, ?)', r[0], r[1], r[2], i);
+      }
+    }
+    await bootstrapAdmin();
+  })().catch((e) => { readyP = null; throw e; });
+  return readyP;
 }
-initDefaults();
+
+/* İlk yönetici: hiç kullanıcı yoksa ortam değişkenlerindeki e-posta ve parola özeti ile oluşturulur.
+   Böylece canlıda "ilk kurulum" ekranı hiç açılmaz; parolanın kendisi sunucuda bulunmaz. */
+async function bootstrapAdmin() {
+  const email = (process.env.BOOTSTRAP_ADMIN_EMAIL || '').trim().toLowerCase(), hash = process.env.BOOTSTRAP_ADMIN_HASH || '';
+  if (!email || !/^scrypt\$/.test(hash)) return;
+  if ((await q.get('SELECT COUNT(*) n FROM users')).n > 0) return;
+  await q.run("INSERT OR IGNORE INTO users (name, email, pass_hash, role) VALUES (?, ?, ?, 'admin')", process.env.BOOTSTRAP_ADMIN_NAME || 'Yönetici', email, hash);
+  await audit(null, '', 'setup', 'İlk yönetici ortam değişkenlerinden oluşturuldu: ' + email);
+}
 
 /* ── Yardımcılar ───────────────────────────────────────────────────── */
-function getSettings() {
+async function getSettings(t) {
   const out = {};
-  for (const r of db.prepare('SELECT key, value FROM settings').all()) out[r.key] = JSON.parse(r.value);
+  for (const r of await (t || q).all('SELECT key, value FROM settings')) out[r.key] = JSON.parse(r.value);
   return out;
 }
-function setSettings(obj) {
-  const up = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
-  for (const [k, v] of Object.entries(obj)) if (k in DEFAULT_SETTINGS) up.run(k, JSON.stringify(v));
+async function setSettings(obj) {
+  for (const [k, v] of Object.entries(obj)) if (k in DEFAULT_SETTINGS) {
+    await q.run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, JSON.stringify(v));
+  }
 }
-
-function getContent() {
+async function getContent() {
   const out = { tr: {}, en: {}, de: {} };
-  for (const r of db.prepare('SELECT lang, key, value FROM content').all()) if (out[r.lang]) out[r.lang][r.key] = r.value;
+  for (const r of await q.all('SELECT lang, key, value FROM content')) if (out[r.lang]) out[r.lang][r.key] = r.value;
   return out;
-}
-
-function tx(fn) {
-  db.exec('BEGIN IMMEDIATE');
-  try { const r = fn(); db.exec('COMMIT'); return r; }
-  catch (e) { db.exec('ROLLBACK'); throw e; }
 }
 
 function parseDoctor(d) {
@@ -210,9 +309,19 @@ function parseDoctor(d) {
   return Object.assign({}, d, { hours: JSON.parse(d.hours || '{}'), online: !!d.online, active: !!d.active, on_site: !!d.on_site });
 }
 
-function audit(user, ip, action, detail) {
-  db.prepare('INSERT INTO audit (user_id, user_name, ip, action, detail) VALUES (?,?,?,?,?)')
-    .run(user ? user.id : null, user ? user.name + ' <' + user.email + '>' : '', ip || '', action, String(detail || '').slice(0, 500));
+async function audit(user, ip, action, detail) {
+  await q.run('INSERT INTO audit (user_id, user_name, ip, action, detail) VALUES (?,?,?,?,?)',
+    user ? user.id : null, user ? user.name + ' <' + user.email + '>' : '', ip || '', action, String(detail || '').slice(0, 500));
 }
 
-module.exports = { db, tx, getSettings, setSettings, getContent, parseDoctor, audit, WEEK, DATA_DIR, UPLOADS };
+/* Fotoğraflar veritabanında tutulur (sunucusuz ortamda kalıcı disk yok) */
+async function putFile(name, mime, buf) {
+  await q.run('INSERT INTO files (name, mime, data) VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET mime = excluded.mime, data = excluded.data', name, mime, buf);
+}
+async function getFile(name) {
+  const r = await q.get('SELECT mime, data FROM files WHERE name = ?', name);
+  return r ? { mime: r.mime, data: Buffer.from(r.data) } : null;
+}
+async function delFile(name) { await q.run('DELETE FROM files WHERE name = ?', name); }
+
+module.exports = { q, ready, REMOTE, getSettings, setSettings, getContent, parseDoctor, audit, putFile, getFile, delFile, WEEK, DATA_DIR, DEFAULT_SETTINGS };

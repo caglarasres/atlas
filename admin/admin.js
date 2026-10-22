@@ -1790,6 +1790,9 @@
         '<div><button class="btn btn--p">Değiştir</button></div></form></section>' +
         '<section class="card"><div class="card__h"><h2>İki adımlı doğrulama</h2>' + (S.user.totp_enabled ? '<span class="badge st-confirmed">Açık</span>' : '<span class="badge st-pending">Kapalı</span>') + '</div>' +
         '<div class="card__b form js-2fa"></div></section></div>' +
+        (admin ? '<section class="card js-sample" hidden><div class="card__h"><h2>Örnek veriler</h2></div><div class="card__b row">' +
+          '<p class="grow" style="margin:0"><span class="js-scount"></span> Gerçek hastalarınızı girmeye başlamadan önce silebilirsiniz; hekimler, tedaviler, fiyatlar ve site metinleri kalır.</p>' +
+          '<button type="button" class="btn btn--d js-sclear">Tüm örnek verileri sil</button></div></section>' : '') +
         (admin ? '<section class="card"><div class="card__h"><h2>Güvenlik günlüğü</h2><span class="mut" style="font-size:.85rem">Girişler, başarısız denemeler, yetki ve ayar değişiklikleri</span></div><div class="scroll js-audit"><p class="empty">Yükleniyor…</p></div></section>' : '');
 
       $('.js-pw', v).addEventListener('submit', function (e) {
@@ -1799,10 +1802,19 @@
       });
       twoFactor($('.js-2fa', v));
       if (!admin) return;
+      api('GET', '/sample').then(function (sm) {
+        if (!sm.patients && !sm.expenses) return;
+        $('.js-sample', v).hidden = false;
+        $('.js-scount', v).textContent = 'Panelde ' + sm.patients.toLocaleString('tr-TR') + ' örnek hasta (randevu ve işlemleriyle) ve ' + sm.expenses + ' örnek gider var.';
+        $('.js-sclear', v).onclick = function () {
+          if (prompt('Örnek hastalar, randevuları, işlemleri ve örnek giderler kalıcı olarak silinecek.\nOnaylamak için SİL yazın:') !== 'SİL') return;
+          api('POST', '/sample/clear', {}).then(function () { toast('Örnek veriler silindi'); refreshBadge(); route(); }).catch(oops);
+        };
+      }).catch(function () {});
       api('GET', '/audit').then(function (r) {
         var A = { login: 'Giriş', 'login.fail': 'Başarısız giriş', 'mfa.fail': 'Hatalı 2FA kodu', setup: 'İlk kurulum', 'password.change': 'Parola değişti',
           '2fa.enable': '2FA açıldı', '2fa.disable': '2FA kapatıldı', 'user.create': 'Kullanıcı eklendi', 'user.update': 'Kullanıcı değişti', 'user.delete': 'Kullanıcı silindi',
-          settings: 'Ayar değişti', content: 'Site metni değişti', 'patient.delete': 'Hasta silindi', 'doctor.create': 'Hekim eklendi', 'doctor.delete': 'Hekim silindi', 'doctor.photo': 'Hekim fotoğrafı' };
+          settings: 'Ayar değişti', content: 'Site metni değişti', 'patient.delete': 'Hasta silindi', 'doctor.create': 'Hekim eklendi', 'doctor.delete': 'Hekim silindi', 'doctor.photo': 'Hekim fotoğrafı', 'service.delete': 'Tedavi silindi', 'sample.clear': 'Örnek veriler silindi' };
         $('.js-audit', v).innerHTML = r.items.length ? '<table class="tbl"><thead><tr><th>Zaman (UTC)</th><th>Olay</th><th>Kullanıcı</th><th class="hide-m">IP</th><th>Ayrıntı</th></tr></thead><tbody>' +
           r.items.map(function (a) {
             var bad = /fail/.test(a.action);

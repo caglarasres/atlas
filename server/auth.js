@@ -5,7 +5,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { db } = require('./db');
+const { q } = require('./db');
 
 const TTL = 12 * 3600 * 1000;          // mutlak süre
 const IDLE = 30 * 60 * 1000;           // hareketsizlik süresi
@@ -49,17 +49,17 @@ function passwordProblem(pw, email) {
 /* ── Oturum ────────────────────────────────────────────────────────── */
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
-function createSession(userId, ip) {
+async function createSession(userId, ip) {
   const token = crypto.randomBytes(32).toString('base64url');
   const now = Date.now();
-  db.prepare('DELETE FROM sessions WHERE expires_at < ? OR last_seen < ?').run(now, now - IDLE);
-  db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at, last_seen, ip) VALUES (?, ?, ?, ?, ?)').run(sha(token), userId, now + TTL, now, ip || '');
-  db.prepare("UPDATE users SET last_login = datetime('now') WHERE id = ?").run(userId);
+  await q.run('DELETE FROM sessions WHERE expires_at < ? OR last_seen < ?', now, now - IDLE);
+  await q.run('INSERT INTO sessions (token_hash, user_id, expires_at, last_seen, ip) VALUES (?, ?, ?, ?, ?)', sha(token), userId, now + TTL, now, ip || '');
+  await q.run("UPDATE users SET last_login = datetime('now') WHERE id = ?", userId);
   return token;
 }
-function destroySession(token) { if (token) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha(token)); }
-function destroyUserSessions(userId, exceptToken) {
-  db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(userId, exceptToken ? sha(exceptToken) : '');
+async function destroySession(token) { if (token) await q.run('DELETE FROM sessions WHERE token_hash = ?', sha(token)); }
+async function destroyUserSessions(userId, exceptToken) {
+  await q.run('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?', userId, exceptToken ? sha(exceptToken) : '');
 }
 
 function readCookie(req, name) {
@@ -70,14 +70,14 @@ function readCookie(req, name) {
 const sessionToken = (req) => readCookie(req, cookieName(req));
 
 /* touch=false: panelin arka plan yenilemeleri hareketsizlik süresini uzatmaz */
-function userFromRequest(req, touch) {
+async function userFromRequest(req, touch) {
   const token = sessionToken(req);
   if (!token) return null;
   const now = Date.now();
-  const row = db.prepare(`SELECT u.id, u.name, u.email, u.role, u.doctor_id, u.active, u.totp_enabled, s.last_seen FROM sessions s
-    JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND s.last_seen > ?`).get(sha(token), now, now - IDLE);
+  const row = await q.get(`SELECT u.id, u.name, u.email, u.role, u.doctor_id, u.active, u.totp_enabled, s.last_seen FROM sessions s
+    JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND s.last_seen > ?`, sha(token), now, now - IDLE);
   if (!row || !row.active) return null;
-  if (touch && now - row.last_seen > 30e3) db.prepare('UPDATE sessions SET last_seen = ? WHERE token_hash = ?').run(now, sha(token));
+  if (touch && now - row.last_seen > 30e3) await q.run('UPDATE sessions SET last_seen = ? WHERE token_hash = ?', now, sha(token));
   return { id: row.id, name: row.name, email: row.email, role: row.role, doctor_id: row.doctor_id, totp_enabled: !!row.totp_enabled };
 }
 
@@ -121,30 +121,31 @@ function verifyTotp(secret, code, lastStep) {
   return 0;
 }
 
-/* Parola doğrulandı, kod bekleniyor: 5 dakikalık tek kullanımlık bilet (bellekte) */
-const tickets = new Map();
-function mfaTicket(userId) {
+/* Parola doğrulandı, kod bekleniyor: 5 dakikalık tek kullanımlık bilet.
+   Veritabanında tutulur: sunucusuz ortamda iki istek farklı sunuculara düşebilir. */
+async function mfaTicket(userId) {
   const t = crypto.randomBytes(24).toString('base64url');
-  tickets.set(sha(t), { userId, exp: Date.now() + 5 * 60e3, tries: 0 });
+  await q.run('DELETE FROM mfa_tickets WHERE expires_at < ?', Date.now());
+  await q.run('INSERT INTO mfa_tickets (hash, user_id, expires_at) VALUES (?, ?, ?)', sha(t), userId, Date.now() + 5 * 60e3);
   return t;
 }
-function useTicket(t) {
-  const k = sha(String(t || '')), v = tickets.get(k);
-  if (!v || v.exp < Date.now() || ++v.tries > 5) { tickets.delete(k); return null; }
-  return { userId: v.userId, done: () => tickets.delete(k) };
+async function useTicket(t) {
+  const k = sha(String(t || ''));
+  await q.run('UPDATE mfa_tickets SET tries = tries + 1 WHERE hash = ?', k);
+  const v = await q.get('SELECT * FROM mfa_tickets WHERE hash = ?', k);
+  if (!v || v.expires_at < Date.now() || v.tries > 5) { await q.run('DELETE FROM mfa_tickets WHERE hash = ?', k); return null; }
+  return { userId: v.user_id, done: () => q.run('DELETE FROM mfa_tickets WHERE hash = ?', k) };
 }
 
-/* ── Deneme sınırı (bellekte) ──────────────────────────────────────── */
-const buckets = new Map();
-function limited(key, max, windowMs) {
+/* ── Deneme sınırı (veritabanında; tüm sunucu örnekleri aynı sayacı görür) ── */
+async function limited(key, max, windowMs) {
   const now = Date.now();
-  const b = buckets.get(key) || { n: 0, reset: now + windowMs };
-  if (now > b.reset) { b.n = 0; b.reset = now + windowMs; }
-  b.n++;
-  buckets.set(key, b);
-  if (buckets.size > 5000) for (const [k, v] of buckets) if (now > v.reset) buckets.delete(k);
-  if (tickets.size > 1000) for (const [k, v] of tickets) if (v.exp < now) tickets.delete(k);
-  return b.n > max;
+  if (Math.random() < 0.02) await q.run('DELETE FROM rate_limits WHERE reset_at < ?', now);
+  await q.run(`INSERT INTO rate_limits (key, n, reset_at) VALUES (?, 1, ?)
+    ON CONFLICT(key) DO UPDATE SET n = CASE WHEN reset_at < ? THEN 1 ELSE n + 1 END,
+    reset_at = CASE WHEN reset_at < ? THEN excluded.reset_at ELSE reset_at END`, key, now + windowMs, now, now);
+  const r = await q.get('SELECT n FROM rate_limits WHERE key = ?', key);
+  return r.n > max;
 }
 
 module.exports = {

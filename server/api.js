@@ -4,10 +4,8 @@
    /api/*         yönetim paneli (oturum gerekir; bazıları yalnızca yönetici) */
 'use strict';
 
-const fs = require('node:fs');
-const path = require('node:path');
 const crypto = require('node:crypto');
-const { db, tx, getSettings, setSettings, getContent, parseDoctor, audit, WEEK, UPLOADS } = require('./db');
+const { q, ready, getSettings, setSettings, getContent, parseDoctor, audit, putFile, delFile, WEEK } = require('./db');
 const A = require('./auth');
 const S = require('./slots');
 
@@ -43,7 +41,8 @@ const APPT_SELECT = `SELECT a.*, p.name AS patient_name, p.phone AS patient_phon
   FROM appointments a JOIN patients p ON p.id = a.patient_id
   LEFT JOIN doctors d ON d.id = a.doctor_id LEFT JOIN services s ON s.id = a.service_id`;
 
-function getAppt(id) { return db.prepare(APPT_SELECT + ' WHERE a.id = ?').get(id); }
+const getAppt = (id, t) => (t || q).get(APPT_SELECT + ' WHERE a.id = ?', id);
+const count = async (sql, ...a) => (await q.get(sql, ...a)).n;
 
 function endOf(date, time, dur) { return date + ' ' + S.toHM(S.toMin(time) + dur); }
 
@@ -56,22 +55,22 @@ const route = (method, path, perm, fn) => {
 };
 
 /* public: site yapılandırması */
-route('GET', '/api/public/config', 'public', () => {
-  const st = getSettings();
+route('GET', '/api/public/config', 'public', async () => {
+  const st = await getSettings();
   return {
     booking: { enabled: !!st.booking_enabled, days: st.booking_days, closed: st.closed_dates, today: S.today() },
-    services: db.prepare('SELECT id, key, name, duration_min FROM services WHERE active = 1 AND online = 1 ORDER BY sort, id').all(),
-    doctors: db.prepare("SELECT id, title || ' ' || name AS name FROM doctors WHERE active = 1 AND online = 1 ORDER BY sort, id").all()
+    services: await q.all('SELECT id, key, name, duration_min FROM services WHERE active = 1 AND online = 1 ORDER BY sort, id'),
+    doctors: await q.all("SELECT id, title || ' ' || name AS name FROM doctors WHERE active = 1 AND online = 1 ORDER BY sort, id")
   };
 });
 
-route('GET', '/api/public/slots', 'public', ({ query }) => {
-  return { slots: S.available({ date: query.date, serviceId: int(query.service), doctorId: int(query.doctor) }).map((s) => s.time) };
+route('GET', '/api/public/slots', 'public', async ({ query }) => {
+  return { slots: (await S.available({ date: query.date, serviceId: int(query.service), doctorId: int(query.doctor) })).map((s) => s.time) };
 });
 
-route('POST', '/api/public/book', 'public', ({ body, ip }) => {
+route('POST', '/api/public/book', 'public', async ({ body, ip }) => {
   if (str(body.website)) return { ok: true };                 // bal küpü: botlara sessizce "tamam"
-  if (A.limited('book:' + ip, 6, 3600e3)) fail(429, 'Çok fazla deneme. Lütfen bizi arayın.');
+  if (await A.limited('book:' + ip, 6, 3600e3)) fail(429, 'Çok fazla deneme. Lütfen bizi arayın.');
   const name = str(body.name, 120), phone = normPhone(body.phone), note = str(body.note, 1000);
   const serviceId = int(body.service), doctorId = int(body.doctor), date = str(body.date, 10), time = str(body.time, 5);
   need(name.length >= 2, 'Ad soyad gerekli.');
@@ -79,137 +78,137 @@ route('POST', '/api/public/book', 'public', ({ body, ip }) => {
   need(body.consent === true, 'Aydınlatma metnini onaylamanız gerekiyor.');
   need(S.isDate(date) && S.isTime(time), 'Tarih ve saat seçin.');
 
-  return tx(() => {
-    const slot = S.available({ date, serviceId, doctorId }).find((s) => s.time === time);
+  return q.tx(async (t) => {
+    const slot = (await S.available({ date, serviceId, doctorId }, t)).find((s) => s.time === time);
     if (!slot) fail(409, 'Bu saat az önce doldu. Lütfen başka bir saat seçin.');
     const docId = doctorId || slot.doctors[0];
-    const svc = db.prepare('SELECT * FROM services WHERE id = ?').get(serviceId);
+    const svc = await t.get('SELECT * FROM services WHERE id = ?', serviceId);
 
-    let p = db.prepare('SELECT * FROM patients WHERE phone = ? ORDER BY id LIMIT 1').get(phone);
+    let p = await t.get('SELECT * FROM patients WHERE phone = ? ORDER BY id LIMIT 1', phone);
     if (!p) {
-      const r = db.prepare("INSERT INTO patients (name, phone, consent_at) VALUES (?, ?, datetime('now'))").run(name, phone);
-      p = { id: Number(r.lastInsertRowid) };
+      const r = await t.run("INSERT INTO patients (name, phone, consent_at) VALUES (?, ?, datetime('now'))", name, phone);
+      p = { id: r.lastInsertRowid };
     } else if (!p.consent_at) {
-      db.prepare("UPDATE patients SET consent_at = datetime('now') WHERE id = ?").run(p.id);
+      await t.run("UPDATE patients SET consent_at = datetime('now') WHERE id = ?", p.id);
     }
-    db.prepare(`INSERT INTO appointments (patient_id, doctor_id, service_id, start, end, status, source, note)
-      VALUES (?, ?, ?, ?, ?, 'pending', 'online', ?)`)
-      .run(p.id, docId, serviceId, date + ' ' + time, endOf(date, time, svc.duration_min), (name !== p.name && p.name ? 'Formdaki ad: ' + name + '\n' : '') + note);
-    const d = db.prepare('SELECT title, name FROM doctors WHERE id = ?').get(docId);
+    await t.run(`INSERT INTO appointments (patient_id, doctor_id, service_id, start, end, status, source, note)
+      VALUES (?, ?, ?, ?, ?, 'pending', 'online', ?)`,
+      p.id, docId, serviceId, date + ' ' + time, endOf(date, time, svc.duration_min), (name !== p.name && p.name ? 'Formdaki ad: ' + name + '\n' : '') + note);
+    const d = await t.get('SELECT title, name FROM doctors WHERE id = ?', docId);
     return { ok: true, date, time, doctor: d.title + ' ' + d.name, service: svc.name };
   });
 });
 
 /* auth */
-route('GET', '/api/auth/state', 'public', ({ user }) => ({
-  setup: db.prepare('SELECT COUNT(*) n FROM users').get().n === 0,
+route('GET', '/api/auth/state', 'public', async ({ user }) => ({
+  setup: (await count('SELECT COUNT(*) n FROM users')) === 0,
   user: user || null
 }));
 
-route('POST', '/api/auth/setup', 'public', ({ body, req, res, ip }) => {
-  if (db.prepare('SELECT COUNT(*) n FROM users').get().n > 0) fail(403, 'Kurulum zaten yapılmış.');
+route('POST', '/api/auth/setup', 'public', async ({ body, req, res, ip }) => {
+  if (await A.limited('setup:' + ip, 10, 3600e3)) fail(429, 'Çok fazla deneme.');
+  if ((await count('SELECT COUNT(*) n FROM users')) > 0) fail(403, 'Kurulum zaten yapılmış.');
   const name = str(body.name, 80), email = str(body.email, 120).toLowerCase(), pw = String(body.password || '');
   need(name && /^\S+@\S+\.\S+$/.test(email), 'Ad ve geçerli bir e-posta girin.');
   const bad = A.passwordProblem(pw, email); if (bad) fail(400, bad);
-  const r = db.prepare("INSERT INTO users (name, email, pass_hash, role) VALUES (?, ?, ?, 'admin')").run(name, email, A.hashPassword(pw));
-  const id = Number(r.lastInsertRowid);
-  audit({ id, name, email }, ip, 'setup', 'İlk yönetici hesabı oluşturuldu');
-  res.setHeader('Set-Cookie', A.cookieHeader(req, A.createSession(id, ip), A.TTL));
+  const r = await q.run("INSERT INTO users (name, email, pass_hash, role) VALUES (?, ?, ?, 'admin')", name, email, A.hashPassword(pw));
+  const id = r.lastInsertRowid;
+  await audit({ id, name, email }, ip, 'setup', 'İlk yönetici hesabı oluşturuldu');
+  res.setHeader('Set-Cookie', A.cookieHeader(req, await A.createSession(id, ip), A.TTL));
   return { ok: true };
 });
 
-route('POST', '/api/auth/login', 'public', ({ body, req, res, ip }) => {
+route('POST', '/api/auth/login', 'public', async ({ body, req, res, ip }) => {
   const email = str(body.email, 120).toLowerCase(), pw = String(body.password || '');
-  if (A.limited('login:' + ip, 20, 900e3) || A.limited('login:' + email, 8, 900e3)) fail(429, 'Çok fazla deneme. 15 dakika sonra tekrar deneyin.');
-  const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  if ((await A.limited('login:' + ip, 20, 900e3)) || (await A.limited('login:' + email, 8, 900e3))) fail(429, 'Çok fazla deneme. 15 dakika sonra tekrar deneyin.');
+  const u = await q.get('SELECT * FROM users WHERE email = ?', email);
   const ok = A.checkPassword(pw, u ? u.pass_hash : A.DUMMY);
   if (!u || !ok || !u.active) {
-    audit(u || null, ip, 'login.fail', email);
+    await audit(u || null, ip, 'login.fail', email);
     fail(401, 'E-posta ya da parola hatalı.');
   }
-  if (u.totp_enabled) return { mfa: true, ticket: A.mfaTicket(u.id) };
-  audit(u, ip, 'login', '');
-  res.setHeader('Set-Cookie', A.cookieHeader(req, A.createSession(u.id, ip), A.TTL));
+  if (u.totp_enabled) return { mfa: true, ticket: await A.mfaTicket(u.id) };
+  await audit(u, ip, 'login', '');
+  res.setHeader('Set-Cookie', A.cookieHeader(req, await A.createSession(u.id, ip), A.TTL));
   return { ok: true };
 });
 
-route('POST', '/api/auth/mfa', 'public', ({ body, req, res, ip }) => {
-  if (A.limited('mfa:' + ip, 20, 900e3)) fail(429, 'Çok fazla deneme. 15 dakika sonra tekrar deneyin.');
-  const t = A.useTicket(body.ticket);
+route('POST', '/api/auth/mfa', 'public', async ({ body, req, res, ip }) => {
+  if (await A.limited('mfa:' + ip, 20, 900e3)) fail(429, 'Çok fazla deneme. 15 dakika sonra tekrar deneyin.');
+  const t = await A.useTicket(body.ticket);
   if (!t) fail(401, 'Süre doldu. Lütfen yeniden giriş yapın.', { restart: true });
-  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(t.userId);
+  const u = await q.get('SELECT * FROM users WHERE id = ?', t.userId);
   const step = u && u.active ? A.verifyTotp(u.totp_secret, body.code, u.totp_last) : 0;
-  if (!step) { audit(u, ip, 'mfa.fail', ''); fail(401, 'Kod hatalı.'); }
-  t.done();
-  db.prepare('UPDATE users SET totp_last = ? WHERE id = ?').run(step, u.id);
-  audit(u, ip, 'login', 'iki adımlı');
-  res.setHeader('Set-Cookie', A.cookieHeader(req, A.createSession(u.id, ip), A.TTL));
+  if (!step) { await audit(u, ip, 'mfa.fail', ''); fail(401, 'Kod hatalı.'); }
+  await t.done();
+  await q.run('UPDATE users SET totp_last = ? WHERE id = ?', step, u.id);
+  await audit(u, ip, 'login', 'iki adımlı');
+  res.setHeader('Set-Cookie', A.cookieHeader(req, await A.createSession(u.id, ip), A.TTL));
   return { ok: true };
 });
 
-route('POST', '/api/auth/logout', 'public', ({ req, res }) => {
-  A.destroySession(A.sessionToken(req));
+route('POST', '/api/auth/logout', 'public', async ({ req, res }) => {
+  await A.destroySession(A.sessionToken(req));
   res.setHeader('Set-Cookie', A.cookieHeader(req, '', 0));
   return { ok: true };
 });
 
-route('POST', '/api/auth/password', 'any', ({ body, user, req, ip }) => {
-  if (A.limited('pw:' + user.id, 10, 900e3)) fail(429, 'Çok fazla deneme.');
-  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
+route('POST', '/api/auth/password', 'any', async ({ body, user, req, ip }) => {
+  if (await A.limited('pw:' + user.id, 10, 900e3)) fail(429, 'Çok fazla deneme.');
+  const u = await q.get('SELECT * FROM users WHERE id = ?', user.id);
   if (!A.checkPassword(String(body.current || ''), u.pass_hash)) fail(400, 'Mevcut parola hatalı.');
   const bad = A.passwordProblem(body.next, u.email); if (bad) fail(400, bad);
-  db.prepare('UPDATE users SET pass_hash = ? WHERE id = ?').run(A.hashPassword(String(body.next)), user.id);
-  A.destroyUserSessions(user.id, A.sessionToken(req));      // diğer cihazlardaki oturumlar kapanır
-  audit(user, ip, 'password.change', '');
+  await q.run('UPDATE users SET pass_hash = ? WHERE id = ?', A.hashPassword(String(body.next)), user.id);
+  await A.destroyUserSessions(user.id, A.sessionToken(req));      // diğer cihazlardaki oturumlar kapanır
+  await audit(user, ip, 'password.change', '');
   return { ok: true };
 });
 
 /* iki adımlı doğrulama kurulumu */
-route('POST', '/api/auth/2fa/start', 'any', ({ user }) => {
+route('POST', '/api/auth/2fa/start', 'any', async ({ user }) => {
   const secret = A.newTotpSecret();
-  db.prepare('UPDATE users SET totp_secret = ?, totp_enabled = 0 WHERE id = ? AND totp_enabled = 0').run(secret, user.id);
-  const u = db.prepare('SELECT totp_secret, totp_enabled FROM users WHERE id = ?').get(user.id);
+  await q.run('UPDATE users SET totp_secret = ?, totp_enabled = 0 WHERE id = ? AND totp_enabled = 0', secret, user.id);
+  const u = await q.get('SELECT totp_secret, totp_enabled FROM users WHERE id = ?', user.id);
   if (u.totp_enabled) fail(400, 'İki adımlı doğrulama zaten açık.');
   const label = encodeURIComponent('Atlas Panel:' + user.email);
   return { secret: u.totp_secret, uri: 'otpauth://totp/' + label + '?secret=' + u.totp_secret + '&issuer=Atlas%20Panel&digits=6&period=30' };
 });
-route('POST', '/api/auth/2fa/enable', 'any', ({ body, user, ip }) => {
-  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
+route('POST', '/api/auth/2fa/enable', 'any', async ({ body, user, ip }) => {
+  const u = await q.get('SELECT * FROM users WHERE id = ?', user.id);
   const step = A.verifyTotp(u.totp_secret, body.code, 0);
   if (!step) fail(400, 'Kod hatalı. Uygulamadaki güncel 6 haneli kodu girin.');
-  db.prepare('UPDATE users SET totp_enabled = 1, totp_last = ? WHERE id = ?').run(step, user.id);
-  audit(user, ip, '2fa.enable', '');
+  await q.run('UPDATE users SET totp_enabled = 1, totp_last = ? WHERE id = ?', step, user.id);
+  await audit(user, ip, '2fa.enable', '');
   return { ok: true };
 });
-route('POST', '/api/auth/2fa/disable', 'any', ({ body, user, ip }) => {
-  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
+route('POST', '/api/auth/2fa/disable', 'any', async ({ body, user, ip }) => {
+  const u = await q.get('SELECT * FROM users WHERE id = ?', user.id);
   if (!A.checkPassword(String(body.password || ''), u.pass_hash)) fail(400, 'Parola hatalı.');
-  db.prepare("UPDATE users SET totp_enabled = 0, totp_secret = '' WHERE id = ?").run(user.id);
-  audit(user, ip, '2fa.disable', '');
+  await q.run("UPDATE users SET totp_enabled = 0, totp_secret = '' WHERE id = ?", user.id);
+  await audit(user, ip, '2fa.disable', '');
   return { ok: true };
 });
 
 /* gösterge */
-route('GET', '/api/dashboard', 'any', () => {
+route('GET', '/api/dashboard', 'any', async () => {
   const t = S.today();
-  const count = (sql, ...a) => db.prepare(sql).get(...a).n;
   return {
     today: t,
-    todayList: db.prepare(APPT_SELECT + " WHERE substr(a.start,1,10) = ? AND a.status != 'cancelled' ORDER BY a.start").all(t),
-    pending: db.prepare(APPT_SELECT + " WHERE a.status = 'pending' AND a.start >= ? ORDER BY a.start LIMIT 50").all(t),
+    todayList: await q.all(APPT_SELECT + " WHERE substr(a.start,1,10) = ? AND a.status != 'cancelled' ORDER BY a.start", t),
+    pending: await q.all(APPT_SELECT + " WHERE a.status = 'pending' AND a.start >= ? ORDER BY a.start LIMIT 50", t),
     stats: {
-      today: count("SELECT COUNT(*) n FROM appointments WHERE substr(start,1,10) = ? AND status NOT IN ('cancelled')", t),
-      week: count("SELECT COUNT(*) n FROM appointments WHERE substr(start,1,10) BETWEEN ? AND ? AND status NOT IN ('cancelled')", t, S.addDays(t, 6)),
-      pending: count("SELECT COUNT(*) n FROM appointments WHERE status = 'pending' AND start >= ?", t),
-      patients: count('SELECT COUNT(*) n FROM patients'),
-      newPatients30: count("SELECT COUNT(*) n FROM patients WHERE created_at >= datetime('now','-30 days')"),
-      balance: db.prepare('SELECT COALESCE(SUM(fee - paid),0) n FROM records').get().n
+      today: await count("SELECT COUNT(*) n FROM appointments WHERE substr(start,1,10) = ? AND status NOT IN ('cancelled')", t),
+      week: await count("SELECT COUNT(*) n FROM appointments WHERE substr(start,1,10) BETWEEN ? AND ? AND status NOT IN ('cancelled')", t, S.addDays(t, 6)),
+      pending: await count("SELECT COUNT(*) n FROM appointments WHERE status = 'pending' AND start >= ?", t),
+      patients: await count('SELECT COUNT(*) n FROM patients'),
+      newPatients30: await count("SELECT COUNT(*) n FROM patients WHERE created_at >= datetime('now','-30 days')"),
+      balance: await count('SELECT COALESCE(SUM(fee - paid),0) n FROM records')
     }
   };
 });
 
 /* randevular */
-route('GET', '/api/appointments', 'any', ({ query }) => {
+route('GET', '/api/appointments', 'any', async ({ query }) => {
   const w = [], a = [];
   if (S.isDate(query.from)) { w.push('substr(a.start,1,10) >= ?'); a.push(query.from); }
   if (S.isDate(query.to)) { w.push('substr(a.start,1,10) <= ?'); a.push(query.to); }
@@ -218,90 +217,91 @@ route('GET', '/api/appointments', 'any', ({ query }) => {
   if (STATUSES.includes(query.status)) { w.push('a.status = ?'); a.push(query.status); }
   if (query.q) { w.push('(p.name LIKE ? OR p.phone LIKE ?)'); a.push('%' + query.q + '%', '%' + normPhone(query.q) + '%'); }
   const sql = APPT_SELECT + (w.length ? ' WHERE ' + w.join(' AND ') : '') + ' ORDER BY a.start ' + (query.order === 'desc' ? 'DESC' : 'ASC') + ' LIMIT 1000';
-  return { items: db.prepare(sql).all(...a) };
+  return { items: await q.all(sql, ...a) };
 });
 
-function saveAppt(body, id) {
+async function saveAppt(body, id) {
   const date = str(body.date, 10), time = str(body.time, 5);
   need(S.isDate(date) && S.isTime(time), 'Tarih ve saat geçersiz.');
   const doctorId = int(body.doctor_id), serviceId = int(body.service_id);
-  const doctor = parseDoctor(db.prepare('SELECT * FROM doctors WHERE id = ?').get(doctorId));
+  const doctor = parseDoctor(await q.get('SELECT * FROM doctors WHERE id = ?', doctorId));
   need(doctor, 'Hekim seçin.');
-  const svc = serviceId ? db.prepare('SELECT * FROM services WHERE id = ?').get(serviceId) : null;
+  const svc = serviceId ? await q.get('SELECT * FROM services WHERE id = ?', serviceId) : null;
   const dur = int(body.duration) || (svc ? svc.duration_min : doctor.slot_min);
   need(dur >= 5 && dur <= 480, 'Süre geçersiz.');
   const status = STATUSES.includes(body.status) ? body.status : 'confirmed';
 
-  return tx(() => {
+  return q.tx(async (t) => {
     let patientId = int(body.patient_id);
     if (!patientId) {
       const name = str(body.patient_name, 120), phone = normPhone(body.patient_phone);
       need(name.length >= 2, 'Hasta seçin ya da yeni hasta adı girin.');
-      const ex = phone ? db.prepare('SELECT id FROM patients WHERE phone = ?').get(phone) : null;
-      patientId = ex ? ex.id : Number(db.prepare('INSERT INTO patients (name, phone) VALUES (?, ?)').run(name, phone).lastInsertRowid);
+      const ex = phone ? await t.get('SELECT id FROM patients WHERE phone = ?', phone) : null;
+      patientId = ex ? ex.id : (await t.run('INSERT INTO patients (name, phone) VALUES (?, ?)', name, phone)).lastInsertRowid;
     }
     if (!body.force && !['cancelled', 'noshow'].includes(status)) {
-      const why = S.fits(doctor, date, time, dur, id);
+      const why = await S.fits(doctor, date, time, dur, id, t);
       if (why) fail(409, why === 'busy' ? 'Hekimin bu saatte başka randevusu var.' : 'Bu saat hekimin çalışma saatleri dışında.', { canForce: true });
     }
     const vals = [patientId, doctorId, serviceId, date + ' ' + time, endOf(date, time, dur), status, str(body.note, 2000)];
     if (id) {
-      db.prepare("UPDATE appointments SET patient_id=?, doctor_id=?, service_id=?, start=?, end=?, status=?, note=?, updated_at=datetime('now') WHERE id=?").run(...vals, id);
-      return getAppt(id);
+      await t.run("UPDATE appointments SET patient_id=?, doctor_id=?, service_id=?, start=?, end=?, status=?, note=?, updated_at=datetime('now') WHERE id=?", ...vals, id);
+      return getAppt(id, t);
     }
     const source = ['phone', 'panel'].includes(body.source) ? body.source : 'panel';
-    const r = db.prepare('INSERT INTO appointments (patient_id, doctor_id, service_id, start, end, status, note, source) VALUES (?,?,?,?,?,?,?,?)').run(...vals, source);
-    return getAppt(Number(r.lastInsertRowid));
+    const r = await t.run('INSERT INTO appointments (patient_id, doctor_id, service_id, start, end, status, note, source) VALUES (?,?,?,?,?,?,?,?)', ...vals, source);
+    return getAppt(r.lastInsertRowid, t);
   });
 }
 
 route('POST', '/api/appointments', 'any', ({ body }) => saveAppt(body));
-route('PUT', '/api/appointments/:id', 'any', ({ body, params }) => {
-  const cur = getAppt(params.id);
+route('PUT', '/api/appointments/:id', 'any', async ({ body, params }) => {
+  const cur = await getAppt(params.id);
   if (!cur) fail(404, 'Randevu bulunamadı.');
   // yalnızca durum değişiyorsa çakışma denetimi gerekmez
   if (Object.keys(body).length === 1 && STATUSES.includes(body.status)) {
-    db.prepare("UPDATE appointments SET status = ?, updated_at = datetime('now') WHERE id = ?").run(body.status, params.id);
+    await q.run("UPDATE appointments SET status = ?, updated_at = datetime('now') WHERE id = ?", body.status, params.id);
     return getAppt(params.id);
   }
   return saveAppt(body, params.id);
 });
-route('DELETE', '/api/appointments/:id', 'any', ({ params }) => {
-  db.prepare('DELETE FROM appointments WHERE id = ?').run(params.id);
+route('DELETE', '/api/appointments/:id', 'any', async ({ params }) => {
+  await q.run('DELETE FROM appointments WHERE id = ?', params.id);
   return { ok: true };
 });
 
-route('GET', '/api/slots', 'any', ({ query }) => {
-  const doctor = parseDoctor(db.prepare('SELECT * FROM doctors WHERE id = ?').get(int(query.doctor)));
+route('GET', '/api/slots', 'any', async ({ query }) => {
+  const doctor = parseDoctor(await q.get('SELECT * FROM doctors WHERE id = ?', int(query.doctor)));
   if (!doctor || !S.isDate(query.date)) return { slots: [] };
   const dur = int(query.duration) || doctor.slot_min, out = [];
   for (const r of doctor.hours[S.weekday(query.date)] || [])
     for (let m = S.toMin(r[0]); m + dur <= S.toMin(r[1]); m += doctor.slot_min)
-      if (!S.fits(doctor, query.date, S.toHM(m), dur, int(query.except))) out.push(S.toHM(m));
+      if (!(await S.fits(doctor, query.date, S.toHM(m), dur, int(query.except)))) out.push(S.toHM(m));
   return { slots: out };
 });
 
 /* hastalar */
-route('GET', '/api/patients', 'any', ({ query }) => {
-  const q = str(query.q, 80);
-  const where = q ? 'WHERE p.name LIKE ? OR p.phone LIKE ? OR p.email LIKE ?' : '';
-  const args = q ? ['%' + q + '%', '%' + (normPhone(q) || q) + '%', '%' + q + '%'] : [];
+route('GET', '/api/patients', 'any', async ({ query }) => {
+  const term = str(query.q, 80);
+  const where = term ? 'WHERE p.name LIKE ? OR p.phone LIKE ? OR p.email LIKE ?' : '';
+  const args = term ? ['%' + term + '%', '%' + (normPhone(term) || term) + '%', '%' + term + '%'] : [];
+  const now = S.nowLocal();
   return {
-    items: db.prepare(`SELECT p.*,
-      (SELECT MAX(start) FROM appointments WHERE patient_id = p.id AND start < datetime('now','localtime')) AS last_visit,
-      (SELECT MIN(start) FROM appointments WHERE patient_id = p.id AND start >= datetime('now','localtime') AND status NOT IN ('cancelled','noshow')) AS next_visit,
+    items: await q.all(`SELECT p.*,
+      (SELECT MAX(start) FROM appointments WHERE patient_id = p.id AND start < ?) AS last_visit,
+      (SELECT MIN(start) FROM appointments WHERE patient_id = p.id AND start >= ? AND status NOT IN ('cancelled','noshow')) AS next_visit,
       (SELECT COALESCE(SUM(fee - paid),0) FROM records WHERE patient_id = p.id) AS balance
-      FROM patients p ${where} ORDER BY p.name COLLATE NOCASE LIMIT ${q ? 50 : 500}`).all(...args)
+      FROM patients p ${where} ORDER BY p.name COLLATE NOCASE LIMIT ${term ? 50 : 500}`, now, now, ...args)
   };
 });
 
-route('GET', '/api/patients/:id', 'any', ({ params }) => {
-  const p = db.prepare('SELECT * FROM patients WHERE id = ?').get(params.id);
+route('GET', '/api/patients/:id', 'any', async ({ params }) => {
+  const p = await q.get('SELECT * FROM patients WHERE id = ?', params.id);
   if (!p) fail(404, 'Hasta bulunamadı.');
   return Object.assign(p, {
-    appointments: db.prepare(APPT_SELECT + ' WHERE a.patient_id = ? ORDER BY a.start DESC').all(params.id),
-    records: db.prepare(`SELECT r.*, d.title || ' ' || d.name AS doctor_name FROM records r
-      LEFT JOIN doctors d ON d.id = r.doctor_id WHERE r.patient_id = ? ORDER BY r.date DESC, r.id DESC`).all(params.id)
+    appointments: await q.all(APPT_SELECT + ' WHERE a.patient_id = ? ORDER BY a.start DESC', params.id),
+    records: await q.all(`SELECT r.*, d.title || ' ' || d.name AS doctor_name FROM records r
+      LEFT JOIN doctors d ON d.id = r.doctor_id WHERE r.patient_id = ? ORDER BY r.date DESC, r.id DESC`, params.id)
   });
 });
 
@@ -312,43 +312,47 @@ function patientVals(b) {
   need(!birth || S.isDate(birth), 'Doğum tarihi geçersiz.');
   return [name, normPhone(b.phone), str(b.email, 120), birth, str(b.gender, 10), str(b.allergies, 1000), str(b.notes, 4000)];
 }
-route('POST', '/api/patients', 'any', ({ body }) => {
-  const r = db.prepare('INSERT INTO patients (name, phone, email, birth_date, gender, allergies, notes, consent_at) VALUES (?,?,?,?,?,?,?,?)')
-    .run(...patientVals(body), body.consent ? S.nowLocal() : null);
-  return { id: Number(r.lastInsertRowid) };
+route('POST', '/api/patients', 'any', async ({ body }) => {
+  const r = await q.run('INSERT INTO patients (name, phone, email, birth_date, gender, allergies, notes, consent_at) VALUES (?,?,?,?,?,?,?,?)',
+    ...patientVals(body), body.consent ? S.nowLocal() : null);
+  return { id: r.lastInsertRowid };
 });
-route('PUT', '/api/patients/:id', 'any', ({ body, params }) => {
-  db.prepare('UPDATE patients SET name=?, phone=?, email=?, birth_date=?, gender=?, allergies=?, notes=? WHERE id=?').run(...patientVals(body), params.id);
-  if (body.consent === true) db.prepare('UPDATE patients SET consent_at = COALESCE(consent_at, ?) WHERE id = ?').run(S.nowLocal(), params.id);
+route('PUT', '/api/patients/:id', 'any', async ({ body, params }) => {
+  await q.run('UPDATE patients SET name=?, phone=?, email=?, birth_date=?, gender=?, allergies=?, notes=? WHERE id=?', ...patientVals(body), params.id);
+  if (body.consent === true) await q.run('UPDATE patients SET consent_at = COALESCE(consent_at, ?) WHERE id = ?', S.nowLocal(), params.id);
   return { ok: true };
 });
-route('DELETE', '/api/patients/:id', 'admin', ({ params, user, ip }) => {
-  const p = db.prepare('SELECT name FROM patients WHERE id = ?').get(params.id);
-  db.prepare('DELETE FROM patients WHERE id = ?').run(params.id);
-  if (p) audit(user, ip, 'patient.delete', '#' + params.id + ' ' + p.name);
+route('DELETE', '/api/patients/:id', 'admin', async ({ params, user, ip }) => {
+  const p = await q.get('SELECT name FROM patients WHERE id = ?', params.id);
+  await q.tx(async (t) => {
+    await t.run('DELETE FROM records WHERE patient_id = ?', params.id);
+    await t.run('DELETE FROM appointments WHERE patient_id = ?', params.id);
+    await t.run('DELETE FROM patients WHERE id = ?', params.id);
+  });
+  if (p) await audit(user, ip, 'patient.delete', '#' + params.id + ' ' + p.name);
   return { ok: true };
 });
 
 /* tedavi kayıtları */
-function recordVals(b, user) {
+async function recordVals(b, user) {
   const date = str(b.date, 10), procedure = str(b.procedure, 200);
   need(S.isDate(date) && procedure, 'Tarih ve işlem gerekli.');
   const fee = int(b.fee) || 0, paid = int(b.paid) || 0, cost = int(b.cost) || 0;
   need(fee >= 0 && paid >= 0 && cost >= 0, 'Tutar geçersiz.');
   const sid = int(b.service_id);
   return [int(b.doctor_id) || user.doctor_id || null, date, str(b.tooth, 40), procedure, str(b.note, 4000), fee, paid,
-    sid && db.prepare('SELECT id FROM services WHERE id = ?').get(sid) ? sid : null, cost];
+    sid && (await q.get('SELECT id FROM services WHERE id = ?', sid)) ? sid : null, cost];
 }
-route('POST', '/api/patients/:id/records', 'any', ({ body, params, user }) => {
-  db.prepare('INSERT INTO records (patient_id, doctor_id, date, tooth, procedure, note, fee, paid, service_id, cost) VALUES (?,?,?,?,?,?,?,?,?,?)').run(params.id, ...recordVals(body, user));
+route('POST', '/api/patients/:id/records', 'any', async ({ body, params, user }) => {
+  await q.run('INSERT INTO records (patient_id, doctor_id, date, tooth, procedure, note, fee, paid, service_id, cost) VALUES (?,?,?,?,?,?,?,?,?,?)', params.id, ...(await recordVals(body, user)));
   return { ok: true };
 });
-route('PUT', '/api/records/:id', 'any', ({ body, params, user }) => {
-  db.prepare('UPDATE records SET doctor_id=?, date=?, tooth=?, procedure=?, note=?, fee=?, paid=?, service_id=?, cost=? WHERE id=?').run(...recordVals(body, user), params.id);
+route('PUT', '/api/records/:id', 'any', async ({ body, params, user }) => {
+  await q.run('UPDATE records SET doctor_id=?, date=?, tooth=?, procedure=?, note=?, fee=?, paid=?, service_id=?, cost=? WHERE id=?', ...(await recordVals(body, user)), params.id);
   return { ok: true };
 });
 /* tüm işlem kayıtları (hasta fark etmeksizin) */
-route('GET', '/api/records', 'any', ({ query }) => {
+route('GET', '/api/records', 'any', async ({ query }) => {
   const w = [], a = [];
   if (S.isDate(query.from)) { w.push('r.date >= ?'); a.push(query.from); }
   if (S.isDate(query.to)) { w.push('r.date <= ?'); a.push(query.to); }
@@ -357,21 +361,21 @@ route('GET', '/api/records', 'any', ({ query }) => {
   if (query.unpaid === '1') w.push('r.fee > r.paid');
   if (query.q) { w.push('(p.name LIKE ? OR r.procedure LIKE ?)'); a.push('%' + query.q + '%', '%' + query.q + '%'); }
   const where = w.length ? ' WHERE ' + w.join(' AND ') : '';
-  const base = ' FROM records r JOIN patients p ON p.id = r.patient_id' + where;
   return {
-    items: db.prepare(`SELECT r.*, p.name AS patient_name, s.name AS service_name, d.title || ' ' || d.name AS doctor_name` + base.replace(' JOIN patients', ' LEFT JOIN services s ON s.id = r.service_id LEFT JOIN doctors d ON d.id = r.doctor_id JOIN patients') +
-      ' ORDER BY r.date DESC, r.id DESC LIMIT 500').all(...a),
-    sum: db.prepare('SELECT COUNT(*) n, COALESCE(SUM(r.fee),0) fee, COALESCE(SUM(r.cost),0) cost, COALESCE(SUM(r.paid),0) paid' + base).get(...a)
+    items: await q.all(`SELECT r.*, p.name AS patient_name, s.name AS service_name, d.title || ' ' || d.name AS doctor_name
+      FROM records r LEFT JOIN services s ON s.id = r.service_id LEFT JOIN doctors d ON d.id = r.doctor_id JOIN patients p ON p.id = r.patient_id` + where +
+      ' ORDER BY r.date DESC, r.id DESC LIMIT 500', ...a),
+    sum: await q.get('SELECT COUNT(*) n, COALESCE(SUM(r.fee),0) fee, COALESCE(SUM(r.cost),0) cost, COALESCE(SUM(r.paid),0) paid FROM records r JOIN patients p ON p.id = r.patient_id' + where, ...a)
   };
 });
 
-route('DELETE', '/api/records/:id', 'any', ({ params }) => {
-  db.prepare('DELETE FROM records WHERE id = ?').run(params.id);
+route('DELETE', '/api/records/:id', 'any', async ({ params }) => {
+  await q.run('DELETE FROM records WHERE id = ?', params.id);
   return { ok: true };
 });
 
 /* hekimler */
-route('GET', '/api/doctors', 'any', () => ({ items: db.prepare('SELECT * FROM doctors ORDER BY active DESC, sort, id').all().map(parseDoctor) }));
+route('GET', '/api/doctors', 'any', async () => ({ items: (await q.all('SELECT * FROM doctors ORDER BY active DESC, sort, id')).map(parseDoctor) }));
 function doctorVals(b) {
   const name = str(b.name, 80);
   need(name, 'Hekim adı gerekli.');
@@ -382,45 +386,48 @@ function doctorVals(b) {
     str(b.bio, 2000), str(b.bio_en, 2000), str(b.bio_de, 2000), b.on_site === false ? 0 : 1];
 }
 const DOC_COLS = 'name, title, specialty, color, slot_min, hours, online, active, sort, bio, bio_en, bio_de, on_site';
-route('POST', '/api/doctors', 'admin', ({ body, user, ip }) => {
+route('POST', '/api/doctors', 'admin', async ({ body, user, ip }) => {
   if (!body.hours) body.hours = WEEK;
-  const r = db.prepare('INSERT INTO doctors (' + DOC_COLS + ') VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run(...doctorVals(body));
-  audit(user, ip, 'doctor.create', body.name);
-  return { id: Number(r.lastInsertRowid) };
+  const r = await q.run('INSERT INTO doctors (' + DOC_COLS + ') VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', ...doctorVals(body));
+  await audit(user, ip, 'doctor.create', body.name);
+  return { id: r.lastInsertRowid };
 });
-route('PUT', '/api/doctors/:id', 'admin', ({ body, params }) => {
-  db.prepare('UPDATE doctors SET ' + DOC_COLS.split(', ').map((c) => c + '=?').join(', ') + ' WHERE id=?').run(...doctorVals(body), params.id);
+route('PUT', '/api/doctors/:id', 'admin', async ({ body, params }) => {
+  await q.run('UPDATE doctors SET ' + DOC_COLS.split(', ').map((c) => c + '=?').join(', ') + ' WHERE id=?', ...doctorVals(body), params.id);
   return { ok: true };
 });
-route('DELETE', '/api/doctors/:id', 'admin', ({ params, user, ip }) => {
-  const n = db.prepare('SELECT COUNT(*) n FROM appointments WHERE doctor_id = ?').get(params.id).n;
+route('DELETE', '/api/doctors/:id', 'admin', async ({ params, user, ip }) => {
+  const n = await count('SELECT COUNT(*) n FROM appointments WHERE doctor_id = ?', params.id);
   if (n) fail(409, 'Bu hekimin ' + n + ' randevusu var; silmek yerine pasif yapın.');
-  const d = db.prepare('SELECT * FROM doctors WHERE id = ?').get(params.id);
-  if (d) removePhoto(d.photo);
-  db.prepare('DELETE FROM doctors WHERE id = ?').run(params.id);
-  if (d) audit(user, ip, 'doctor.delete', d.name);
+  const d = await q.get('SELECT * FROM doctors WHERE id = ?', params.id);
+  if (d) await removePhoto(d.photo);
+  await q.run('UPDATE records SET doctor_id = NULL WHERE doctor_id = ?', params.id);
+  await q.run('UPDATE users SET doctor_id = NULL WHERE doctor_id = ?', params.id);
+  await q.run('DELETE FROM doctors WHERE id = ?', params.id);
+  if (d) await audit(user, ip, 'doctor.delete', d.name);
   return { ok: true };
 });
 
-route('POST', '/api/doctors/order', 'admin', ({ body }) => {
+route('POST', '/api/doctors/order', 'admin', async ({ body }) => {
   const ids = (Array.isArray(body.ids) ? body.ids : []).map(int).filter((n) => n > 0);
-  tx(() => ids.forEach((id, i) => db.prepare('UPDATE doctors SET sort = ? WHERE id = ?').run(i, id)));
+  await q.tx(async (t) => { for (let i = 0; i < ids.length; i++) await t.run('UPDATE doctors SET sort = ? WHERE id = ?', i, ids[i]); });
   return { ok: true };
 });
 
 /* hekim fotoğrafı: yalnızca JPEG/PNG/WebP; tür, uzantıya değil dosyanın ilk baytlarına göre belirlenir */
+const MIME = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
 function imageType(buf) {
   if (buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
   if (buf.length > 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'png';
   if (buf.length > 12 && buf.toString('latin1', 0, 4) === 'RIFF' && buf.toString('latin1', 8, 12) === 'WEBP') return 'webp';
   return null;
 }
-function removePhoto(rel) {
-  if (!rel || !/^\/uploads\/doctors\/[\w.-]+$/.test(rel)) return;
-  fs.rm(path.join(UPLOADS, 'doctors', path.basename(rel)), { force: true }, () => {});
+async function removePhoto(rel) {
+  const m = /^\/uploads\/doctors\/([\w.-]+)$/.exec(rel || '');
+  if (m) await delFile('doctors/' + m[1]);
 }
-route('POST', '/api/doctors/:id/photo', 'admin', ({ body, params, user, ip }) => {
-  const d = db.prepare('SELECT * FROM doctors WHERE id = ?').get(params.id);
+route('POST', '/api/doctors/:id/photo', 'admin', async ({ body, params, user, ip }) => {
+  const d = await q.get('SELECT * FROM doctors WHERE id = ?', params.id);
   if (!d) fail(404, 'Hekim bulunamadı.');
   const m = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(String(body.data || ''));
   need(m, 'Fotoğraf JPEG, PNG ya da WebP olmalı.');
@@ -429,20 +436,20 @@ route('POST', '/api/doctors/:id/photo', 'admin', ({ body, params, user, ip }) =>
   const ext = imageType(buf);
   need(ext, 'Dosya geçerli bir görsel değil.');
   const name = d.id + '-' + crypto.randomBytes(8).toString('hex') + '.' + ext;
-  fs.writeFileSync(path.join(UPLOADS, 'doctors', name), buf, { mode: 0o640 });
-  removePhoto(d.photo);
-  db.prepare('UPDATE doctors SET photo = ? WHERE id = ?').run('/uploads/doctors/' + name, d.id);
-  audit(user, ip, 'doctor.photo', d.name);
+  await putFile('doctors/' + name, MIME[ext], buf);
+  await removePhoto(d.photo);
+  await q.run('UPDATE doctors SET photo = ? WHERE id = ?', '/uploads/doctors/' + name, d.id);
+  await audit(user, ip, 'doctor.photo', d.name);
   return { photo: '/uploads/doctors/' + name };
 });
-route('DELETE', '/api/doctors/:id/photo', 'admin', ({ params }) => {
-  const d = db.prepare('SELECT * FROM doctors WHERE id = ?').get(params.id);
-  if (d) { removePhoto(d.photo); db.prepare("UPDATE doctors SET photo = '' WHERE id = ?").run(d.id); }
+route('DELETE', '/api/doctors/:id/photo', 'admin', async ({ params }) => {
+  const d = await q.get('SELECT * FROM doctors WHERE id = ?', params.id);
+  if (d) { await removePhoto(d.photo); await q.run("UPDATE doctors SET photo = '' WHERE id = ?", d.id); }
   return { ok: true };
 });
 
 /* hizmetler */
-route('GET', '/api/services', 'any', () => ({ items: db.prepare('SELECT * FROM services ORDER BY sort, id').all() }));
+route('GET', '/api/services', 'any', async () => ({ items: await q.all('SELECT * FROM services ORDER BY sort, id') }));
 function serviceVals(b) {
   const name = str(b.name, 80), dur = int(b.duration_min);
   need(name && dur >= 5 && dur <= 480, 'Ad ve süre (5–480 dk) gerekli.');
@@ -450,37 +457,37 @@ function serviceVals(b) {
   need(cost >= 0, 'Maliyet geçersiz.');
   return [name, dur, price && price > 0 ? price : null, b.online === false ? 0 : 1, b.active === false ? 0 : 1, int(b.sort) || 0, cost];
 }
-route('POST', '/api/services', 'admin', ({ body }) => {
+route('POST', '/api/services', 'admin', async ({ body }) => {
   const key = (str(body.key, 40) || str(body.name, 40)).toLowerCase().normalize('NFKD').replace(/[^\w]+/g, '-').replace(/^-|-$/g, '') + '-' + Date.now().toString(36);
-  const r = db.prepare('INSERT INTO services (name, duration_min, price, online, active, sort, cost, key) VALUES (?,?,?,?,?,?,?,?)').run(...serviceVals(body), key);
-  return { id: Number(r.lastInsertRowid) };
+  const r = await q.run('INSERT INTO services (name, duration_min, price, online, active, sort, cost, key) VALUES (?,?,?,?,?,?,?,?)', ...serviceVals(body), key);
+  return { id: r.lastInsertRowid };
 });
-route('PUT', '/api/services/:id', 'admin', ({ body, params }) => {
-  db.prepare('UPDATE services SET name=?, duration_min=?, price=?, online=?, active=?, sort=?, cost=? WHERE id=?').run(...serviceVals(body), params.id);
+route('PUT', '/api/services/:id', 'admin', async ({ body, params }) => {
+  await q.run('UPDATE services SET name=?, duration_min=?, price=?, online=?, active=?, sort=?, cost=? WHERE id=?', ...serviceVals(body), params.id);
   return { ok: true };
 });
-route('DELETE', '/api/services/:id', 'admin', ({ params, query, user, ip }) => {
-  const svc = db.prepare('SELECT * FROM services WHERE id = ?').get(params.id);
+route('DELETE', '/api/services/:id', 'admin', async ({ params, query, user, ip }) => {
+  const svc = await q.get('SELECT * FROM services WHERE id = ?', params.id);
   if (!svc) return { ok: true };
-  const na = db.prepare('SELECT COUNT(*) n FROM appointments WHERE service_id = ?').get(params.id).n;
-  const nr = db.prepare('SELECT COUNT(*) n FROM records WHERE service_id = ?').get(params.id).n;
+  const na = await count('SELECT COUNT(*) n FROM appointments WHERE service_id = ?', params.id);
+  const nr = await count('SELECT COUNT(*) n FROM records WHERE service_id = ?', params.id);
   if ((na || nr) && query.force !== '1') {
     fail(409, svc.name + ' ' + na + ' randevuda ve ' + nr + ' işlem kaydında kullanılıyor.', { canForce: true, appointments: na, records: nr });
   }
-  tx(() => {
+  await q.tx(async (t) => {
     // geçmiş kayıtlar kaybolmasın: işlem kayıtlarında açıklama zaten var; randevulara tedavi adı not olarak düşülür
-    db.prepare("UPDATE appointments SET note = CASE WHEN note = '' THEN ? ELSE note || char(10) || ? END WHERE service_id = ?")
-      .run('Tedavi: ' + svc.name, 'Tedavi: ' + svc.name, params.id);
-    db.prepare('UPDATE records SET service_id = NULL WHERE service_id = ?').run(params.id);
-    db.prepare('DELETE FROM services WHERE id = ?').run(params.id);
+    await t.run("UPDATE appointments SET note = CASE WHEN note = '' THEN ? ELSE note || char(10) || ? END, service_id = NULL WHERE service_id = ?",
+      'Tedavi: ' + svc.name, 'Tedavi: ' + svc.name, params.id);
+    await t.run('UPDATE records SET service_id = NULL WHERE service_id = ?', params.id);
+    await t.run('DELETE FROM services WHERE id = ?', params.id);
   });
-  audit(user, ip, 'service.delete', svc.name);
+  await audit(user, ip, 'service.delete', svc.name);
   return { ok: true };
 });
 
 /* ayarlar */
 route('GET', '/api/settings', 'any', () => getSettings());
-route('PUT', '/api/settings', 'admin', ({ body, user, ip }) => {
+route('PUT', '/api/settings', 'admin', async ({ body, user, ip }) => {
   const s = {};
   if ('clinic_name' in body) s.clinic_name = str(body.clinic_name, 120);
   if ('phone_display' in body) s.phone_display = str(body.phone_display, 40);
@@ -490,8 +497,8 @@ route('PUT', '/api/settings', 'admin', ({ body, user, ip }) => {
   if ('booking_days' in body) { const n = int(body.booking_days); need(n >= 1 && n <= 180, 'Gün sayısı 1–180 olmalı.'); s.booking_days = n; }
   if ('booking_notice_min' in body) { const n = int(body.booking_notice_min); need(n >= 0 && n <= 10080, 'Süre geçersiz.'); s.booking_notice_min = n; }
   if ('closed_dates' in body) s.closed_dates = (Array.isArray(body.closed_dates) ? body.closed_dates : []).filter(S.isDate).sort();
-  setSettings(s);
-  audit(user, ip, 'settings', Object.keys(s).join(', '));
+  await setSettings(s);
+  await audit(user, ip, 'settings', Object.keys(s).join(', '));
   return getSettings();
 });
 
@@ -504,57 +511,59 @@ function safeHtml(s) {
     .replace(/&lt;br\s*\/?&gt;/gi, '<br>')
     .replace(/&lt;(\/?)(em|strong|b|i)&gt;/gi, (_, sl, t) => '<' + sl + t.toLowerCase() + '>');
 }
-route('PUT', '/api/content', 'admin', ({ body, user, ip }) => {
+route('PUT', '/api/content', 'admin', async ({ body, user, ip }) => {
   const changes = Array.isArray(body.changes) ? body.changes : [];
-  audit(user, ip, 'content', changes.length + ' metin');
-  tx(() => {
+  await audit(user, ip, 'content', changes.length + ' metin');
+  await q.tx(async (t) => {
     for (const c of changes) {
       if (!['tr', 'en', 'de'].includes(c.lang) || !/^[\w.-]{1,60}$/.test(c.key || '')) continue;
-      if (c.value === null) db.prepare('DELETE FROM content WHERE lang = ? AND key = ?').run(c.lang, c.key);
-      else db.prepare('INSERT INTO content (lang, key, value) VALUES (?,?,?) ON CONFLICT(lang, key) DO UPDATE SET value = excluded.value')
-        .run(c.lang, c.key, safeHtml(String(c.value).slice(0, 5000)));
+      if (c.value === null) await t.run('DELETE FROM content WHERE lang = ? AND key = ?', c.lang, c.key);
+      else await t.run('INSERT INTO content (lang, key, value) VALUES (?,?,?) ON CONFLICT(lang, key) DO UPDATE SET value = excluded.value',
+        c.lang, c.key, safeHtml(String(c.value).slice(0, 5000)));
     }
   });
   return getContent();
 });
 
 /* kullanıcılar */
-route('GET', '/api/users', 'admin', () => ({ items: db.prepare('SELECT id, name, email, role, doctor_id, active, created_at, last_login, totp_enabled FROM users ORDER BY id').all() }));
+route('GET', '/api/users', 'admin', async () => ({ items: await q.all('SELECT id, name, email, role, doctor_id, active, created_at, last_login, totp_enabled FROM users ORDER BY id') }));
 function userVals(b) {
   const name = str(b.name, 80), email = str(b.email, 120).toLowerCase();
   need(name && /^\S+@\S+\.\S+$/.test(email), 'Ad ve geçerli e-posta gerekli.');
   need(['admin', 'staff', 'doctor'].includes(b.role), 'Rol geçersiz.');
   return [name, email, b.role, b.role === 'doctor' ? int(b.doctor_id) : null, b.active === false ? 0 : 1];
 }
-route('POST', '/api/users', 'admin', ({ body, user, ip }) => {
+const unique = (e) => /UNIQUE/i.test(e && e.message);
+route('POST', '/api/users', 'admin', async ({ body, user, ip }) => {
   const v = userVals(body);
   const bad = A.passwordProblem(body.password, v[1]); if (bad) fail(400, bad);
   try {
-    const r = db.prepare('INSERT INTO users (name, email, role, doctor_id, active, pass_hash) VALUES (?,?,?,?,?,?)').run(...v, A.hashPassword(String(body.password)));
-    audit(user, ip, 'user.create', v[1] + ' (' + v[2] + ')');
-    return { id: Number(r.lastInsertRowid) };
-  } catch (e) { if (/UNIQUE/.test(e.message)) fail(409, 'Bu e-posta zaten kayıtlı.'); throw e; }
+    const r = await q.run('INSERT INTO users (name, email, role, doctor_id, active, pass_hash) VALUES (?,?,?,?,?,?)', ...v, A.hashPassword(String(body.password)));
+    await audit(user, ip, 'user.create', v[1] + ' (' + v[2] + ')');
+    return { id: r.lastInsertRowid };
+  } catch (e) { if (unique(e)) fail(409, 'Bu e-posta zaten kayıtlı.'); throw e; }
 });
-route('PUT', '/api/users/:id', 'admin', ({ body, params, user, ip }) => {
+route('PUT', '/api/users/:id', 'admin', async ({ body, params, user, ip }) => {
   const v = userVals(body);
   if (Number(params.id) === user.id && (v[2] !== 'admin' || !v[4])) fail(400, 'Kendi yönetici yetkinizi kaldıramazsınız.');
-  const before = db.prepare('SELECT role, active FROM users WHERE id = ?').get(params.id);
+  const before = await q.get('SELECT role, active FROM users WHERE id = ?', params.id);
   if (!before) fail(404, 'Kullanıcı bulunamadı.');
   if (body.password) { const bad = A.passwordProblem(body.password, v[1]); if (bad) fail(400, bad); }
-  try { db.prepare('UPDATE users SET name=?, email=?, role=?, doctor_id=?, active=? WHERE id=?').run(...v, params.id); }
-  catch (e) { if (/UNIQUE/.test(e.message)) fail(409, 'Bu e-posta zaten kayıtlı.'); throw e; }
-  if (body.password) db.prepare('UPDATE users SET pass_hash = ? WHERE id = ?').run(A.hashPassword(String(body.password)), params.id);
-  if (body.reset_2fa) db.prepare("UPDATE users SET totp_enabled = 0, totp_secret = '' WHERE id = ?").run(params.id);
+  try { await q.run('UPDATE users SET name=?, email=?, role=?, doctor_id=?, active=? WHERE id=?', ...v, params.id); }
+  catch (e) { if (unique(e)) fail(409, 'Bu e-posta zaten kayıtlı.'); throw e; }
+  if (body.password) await q.run('UPDATE users SET pass_hash = ? WHERE id = ?', A.hashPassword(String(body.password)), params.id);
+  if (body.reset_2fa) await q.run("UPDATE users SET totp_enabled = 0, totp_secret = '' WHERE id = ?", params.id);
   // yetkisi değişen, parolası sıfırlanan ya da pasifleşen kullanıcının oturumları kapanır
-  if (body.password || !v[4] || before.role !== v[2] || body.reset_2fa) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(params.id);
-  audit(user, ip, 'user.update', v[1] + ' (' + v[2] + (v[4] ? '' : ', pasif') + (body.password ? ', parola sıfırlandı' : '') + (body.reset_2fa ? ', 2FA sıfırlandı' : '') + ')');
+  if (body.password || !v[4] || before.role !== v[2] || body.reset_2fa) await q.run('DELETE FROM sessions WHERE user_id = ?', params.id);
+  await audit(user, ip, 'user.update', v[1] + ' (' + v[2] + (v[4] ? '' : ', pasif') + (body.password ? ', parola sıfırlandı' : '') + (body.reset_2fa ? ', 2FA sıfırlandı' : '') + ')');
   return { ok: true };
 });
-route('DELETE', '/api/users/:id', 'admin', ({ params, user, ip }) => {
+route('DELETE', '/api/users/:id', 'admin', async ({ params, user, ip }) => {
   if (Number(params.id) === user.id) fail(400, 'Kendinizi silemezsiniz.');
-  const u = db.prepare('SELECT email FROM users WHERE id = ?').get(params.id);
-  db.prepare('DELETE FROM users WHERE id = ?').run(params.id);
-  if (u) audit(user, ip, 'user.delete', u.email);
+  const u = await q.get('SELECT email FROM users WHERE id = ?', params.id);
+  await q.run('DELETE FROM sessions WHERE user_id = ?', params.id);
+  await q.run('DELETE FROM users WHERE id = ?', params.id);
+  if (u) await audit(user, ip, 'user.delete', u.email);
   return { ok: true };
 });
 
@@ -567,28 +576,46 @@ function expenseVals(b) {
   need(EXPENSE_CATS.includes(b.category), 'Gider türü seçin.');
   return [date, b.category, amount, str(b.note, 300)];
 }
-route('GET', '/api/expenses', 'admin', ({ query }) => {
+route('GET', '/api/expenses', 'admin', async ({ query }) => {
   const from = S.isDate(query.from) ? query.from : '0000-00-00', to = S.isDate(query.to) ? query.to : '9999-12-31';
-  return { categories: EXPENSE_CATS, items: db.prepare('SELECT * FROM expenses WHERE date BETWEEN ? AND ? ORDER BY date DESC, id DESC LIMIT 2000').all(from, to) };
+  return { categories: EXPENSE_CATS, items: await q.all('SELECT * FROM expenses WHERE date BETWEEN ? AND ? ORDER BY date DESC, id DESC LIMIT 2000', from, to) };
 });
-route('POST', '/api/expenses', 'admin', ({ body }) => {
-  const r = db.prepare('INSERT INTO expenses (date, category, amount, note) VALUES (?,?,?,?)').run(...expenseVals(body));
-  return { id: Number(r.lastInsertRowid) };
+route('POST', '/api/expenses', 'admin', async ({ body }) => {
+  const r = await q.run('INSERT INTO expenses (date, category, amount, note) VALUES (?,?,?,?)', ...expenseVals(body));
+  return { id: r.lastInsertRowid };
 });
-route('PUT', '/api/expenses/:id', 'admin', ({ body, params }) => {
-  db.prepare('UPDATE expenses SET date=?, category=?, amount=?, note=? WHERE id=?').run(...expenseVals(body), params.id);
+route('PUT', '/api/expenses/:id', 'admin', async ({ body, params }) => {
+  await q.run('UPDATE expenses SET date=?, category=?, amount=?, note=? WHERE id=?', ...expenseVals(body), params.id);
   return { ok: true };
 });
-route('DELETE', '/api/expenses/:id', 'admin', ({ params }) => {
-  db.prepare('DELETE FROM expenses WHERE id = ?').run(params.id);
+route('DELETE', '/api/expenses/:id', 'admin', async ({ params }) => {
+  await q.run('DELETE FROM expenses WHERE id = ?', params.id);
   return { ok: true };
 });
 
 /* analiz */
 route('GET', '/api/analytics', 'admin', ({ query }) => require('./analytics').report(query));
 
+/* örnek veri: kaç tane var, tek tıkla sil */
+const SAMPLE = "notes = 'Örnek kayıt'";
+route('GET', '/api/sample', 'admin', async () => ({
+  patients: await count('SELECT COUNT(*) n FROM patients WHERE ' + SAMPLE),
+  expenses: await count("SELECT COUNT(*) n FROM expenses WHERE note LIKE '%(örnek)'")
+}));
+route('POST', '/api/sample/clear', 'admin', async ({ user, ip }) => {
+  const ids = 'SELECT id FROM patients WHERE ' + SAMPLE;
+  await q.tx(async (t) => {
+    await t.run('DELETE FROM records WHERE patient_id IN (' + ids + ')');
+    await t.run('DELETE FROM appointments WHERE patient_id IN (' + ids + ')');
+    await t.run('DELETE FROM patients WHERE ' + SAMPLE);
+    await t.run("DELETE FROM expenses WHERE note LIKE '%(örnek)'");
+  });
+  await audit(user, ip, 'sample.clear', 'Örnek hasta, randevu, işlem ve giderler silindi');
+  return { ok: true };
+});
+
 /* güvenlik günlüğü */
-route('GET', '/api/audit', 'admin', () => ({ items: db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 300').all() }));
+route('GET', '/api/audit', 'admin', async () => ({ items: await q.all('SELECT * FROM audit ORDER BY id DESC LIMIT 300') }));
 
 /* ── Dağıtıcı ──────────────────────────────────────────────────────── */
 async function handle(req, res, url, ip) {
@@ -623,7 +650,8 @@ async function handle(req, res, url, ip) {
       if (!body || typeof body !== 'object' || Array.isArray(body)) body = {};
     }
 
-    const user = A.userFromRequest(req, !req.headers['x-background']);
+    await ready();
+    const user = await A.userFromRequest(req, !req.headers['x-background']);
     const { perm } = match.r;
     if (perm !== 'public' && !user) return send(401, { error: 'Oturum açın.' });
     if (perm === 'admin' && user.role !== 'admin') return send(403, { error: 'Bu işlem için yönetici yetkisi gerekli.' });
@@ -638,7 +666,14 @@ async function handle(req, res, url, ip) {
   }
 }
 
+/* Gövde: Vercel bazen isteği önceden okur (req.body); yerel sunucuda akıştan okunur */
 function readBody(req, limit) {
+  if (req.body !== undefined && req.body !== null) {
+    const b = req.body;
+    const s = Buffer.isBuffer(b) ? b.toString('utf8') : typeof b === 'string' ? b : JSON.stringify(b);
+    if (s.length > limit) return Promise.reject(new HttpError(413, 'İstek çok büyük.'));
+    return Promise.resolve(s);
+  }
   return new Promise((resolve, reject) => {
     let size = 0; const chunks = [];
     req.on('data', (c) => { size += c.length; if (size > limit) { reject(new HttpError(413, 'İstek çok büyük.')); req.destroy(); } else chunks.push(c); });
@@ -647,4 +682,4 @@ function readBody(req, limit) {
   });
 }
 
-module.exports = { handle };
+module.exports = { handle, HttpError };

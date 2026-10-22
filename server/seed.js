@@ -1,8 +1,8 @@
 /* Atlas — başlangıç verisi.
    npm run seed               → hekim yoksa iki hekim; boş biyografilere örnek metin ve örnek portre ekler
-   npm run seed -- --users    → her rol için örnek kullanıcı; parolalar data/dev-credentials.txt dosyasına yazılır
-   npm run seed -- --demo     → deneme hastaları ve bu haftaya randevular (gerçek kişi değildir)
+   npm run seed -- --users    → her rol için örnek kullanıcı (yalnızca yerel deneme); parolalar data/dev-credentials.txt dosyasına yazılır
    npm run seed -- --sample   → 12 aylık örnek veri: hasta, randevu, tedavi, ücret/maliyet, gider (mevcut hasta verisini SİLER)
+   TURSO_DATABASE_URL tanımlıysa uzak (canlı) veritabanına yazar.
    Hekim adları Google yorumlarından; biyografiler ve portreler ÖRNEKTİR — panelden gerçekleriyle değiştirin. */
 'use strict';
 
@@ -10,16 +10,8 @@ process.env.TZ = process.env.TZ || 'Europe/Istanbul';
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { db, WEEK, DATA_DIR, UPLOADS } = require('./db');
+const { q, ready, putFile, WEEK, DATA_DIR, REMOTE } = require('./db');
 const A = require('./auth');
-const S = require('./slots');
-
-if (db.prepare('SELECT COUNT(*) n FROM doctors').get().n === 0) {
-  const ins = db.prepare('INSERT INTO doctors (name, title, specialty, color, slot_min, hours, sort) VALUES (?,?,?,?,?,?,?)');
-  ins.run('Saim', 'Dt.', 'Protetik diş tedavisi', '#3f6454', 30, JSON.stringify(WEEK), 0);
-  ins.run('Esra', 'Dt.', 'Estetik diş hekimliği', '#a7743f', 30, JSON.stringify(WEEK), 1);
-  console.log('2 hekim eklendi (Dt. Saim, Dt. Esra) — soyadlarını ve saatlerini panelden güncelleyin.');
-}
 
 /* ── Örnek biyografi ve portre ─────────────────────────────────────── */
 const SAMPLE_BIO = [
@@ -51,67 +43,56 @@ function sampleAvatar(i) {
 </svg>`;
 }
 
-const docs = db.prepare('SELECT * FROM doctors ORDER BY sort, id').all();
-docs.forEach((d, i) => {
-  if (!d.bio) {
-    const b = SAMPLE_BIO[i % SAMPLE_BIO.length];
-    db.prepare('UPDATE doctors SET bio = ?, bio_en = ?, bio_de = ? WHERE id = ?').run(b.tr, b.en, b.de, d.id);
+async function main() {
+  await ready();
+  if ((await q.get('SELECT COUNT(*) n FROM doctors')).n === 0) {
+    const ins = 'INSERT INTO doctors (name, title, specialty, color, slot_min, hours, sort) VALUES (?,?,?,?,?,?,?)';
+    await q.run(ins, 'Saim', 'Dt.', 'Protetik diş tedavisi', '#3f6454', 30, JSON.stringify(WEEK), 0);
+    await q.run(ins, 'Esra', 'Dt.', 'Estetik diş hekimliği', '#a7743f', 30, JSON.stringify(WEEK), 1);
+    console.log('2 hekim eklendi (Dt. Saim, Dt. Esra) — soyadlarını ve saatlerini panelden güncelleyin.');
   }
-  if (!d.photo) {
-    const name = d.id + '-sample-' + crypto.randomBytes(4).toString('hex') + '.svg';
-    fs.writeFileSync(path.join(UPLOADS, 'doctors', name), sampleAvatar(i));
-    db.prepare('UPDATE doctors SET photo = ? WHERE id = ?').run('/uploads/doctors/' + name, d.id);
-  }
-});
-console.log('Hekim biyografi ve portreleri: boş olanlara örnek eklendi.');
 
-/* ── Örnek kullanıcılar ────────────────────────────────────────────── */
-if (process.argv.includes('--users')) {
-  const pw = () => crypto.randomBytes(12).toString('base64url');   // 16 karakter, rastgele
-  const saim = db.prepare("SELECT id FROM doctors WHERE name LIKE 'Saim%' ORDER BY id LIMIT 1").get();
-  const sample = [
-    ['Örnek Yönetici', 'yonetici@atlas.test', 'admin', null],
-    ['Örnek Sekreter', 'sekreter@atlas.test', 'staff', null],
-    ['Dt. Saim (örnek hesap)', 'saim@atlas.test', 'doctor', saim ? saim.id : null]
-  ];
-  const lines = [];
-  for (const [name, email, role, doctorId] of sample) {
-    if (db.prepare('SELECT id FROM users WHERE email = ?').get(email)) { lines.push(email + '  (zaten vardı, parola değişmedi)'); continue; }
-    const p = pw();
-    db.prepare('INSERT INTO users (name, email, pass_hash, role, doctor_id) VALUES (?,?,?,?,?)').run(name, email, A.hashPassword(p), role, doctorId);
-    lines.push(email.padEnd(24) + p + '   ' + role);
-  }
-  const file = path.join(DATA_DIR, 'dev-credentials.txt');
-  fs.appendFileSync(file, '# Örnek hesaplar — yalnızca yerel deneme için. Canlıya almadan önce silin.\n' + lines.join('\n') + '\n\n', { mode: 0o600 });
-  console.log('Örnek kullanıcılar oluşturuldu → ' + file);
-}
-
-if (process.argv.includes('--sample')) {
-  const n = require('./sample').run();
-  console.log('Örnek veri: ' + n.patients + ' hasta, ' + n.appointments + ' randevu, ' + n.records + ' tedavi kaydı, ' + n.expenses + ' gider.');
-}
-
-if (process.argv.includes('--demo')) {
-  const names = ['Ayşe Demir', 'Mehmet Yıldız', 'Zeynep Kaya', 'Ali Çelik', 'Elif Şahin', 'Burak Aydın', 'Selin Arslan',
-    'Emre Koç', 'Derya Öztürk', 'Can Polat', 'Merve Aksoy', 'Hakan Erdem'];
-  const insP = db.prepare("INSERT INTO patients (name, phone, birth_date, consent_at, notes) VALUES (?, ?, ?, datetime('now'), 'Deneme kaydı')");
-  const ids = names.map((n, i) => Number(insP.run(n, '0555000' + String(1000 + i).slice(-4), (1970 + i * 3) + '-0' + ((i % 9) + 1) + '-15').lastInsertRowid));
-  const ds = db.prepare('SELECT id FROM doctors WHERE active = 1').all().map((d) => d.id);
-  const svcs = db.prepare('SELECT id, duration_min FROM services').all();
-  const insA = db.prepare('INSERT INTO appointments (patient_id, doctor_id, service_id, start, end, status, source) VALUES (?,?,?,?,?,?,?)');
-  const times = ['09:30', '10:30', '11:30', '14:00', '15:30', '16:30', '17:30'];
-  let k = 0;
-  for (let day = -3; day <= 6; day++) {
-    const date = S.addDays(S.today(), day);
-    if (S.weekday(date) === 0) continue;
-    for (let j = 0; j < 4; j++, k++) {
-      const svc = svcs[k % svcs.length], t = times[(k * 3 + j) % times.length];
-      const status = day < 0 ? (k % 7 === 0 ? 'noshow' : 'done') : day === 0 ? 'confirmed' : (k % 5 === 0 ? 'pending' : 'confirmed');
-      insA.run(ids[k % ids.length], ds[j % ds.length], svc.id, date + ' ' + t, date + ' ' + S.toHM(S.toMin(t) + svc.duration_min), status, k % 5 === 0 ? 'online' : 'panel');
+  const docs = await q.all('SELECT * FROM doctors ORDER BY sort, id');
+  for (let i = 0; i < docs.length; i++) {
+    const d = docs[i];
+    if (!d.bio) {
+      const b = SAMPLE_BIO[i % SAMPLE_BIO.length];
+      await q.run('UPDATE doctors SET bio = ?, bio_en = ?, bio_de = ? WHERE id = ?', b.tr, b.en, b.de, d.id);
+    }
+    if (!d.photo) {
+      const name = d.id + '-sample-' + crypto.randomBytes(4).toString('hex') + '.svg';
+      await putFile('doctors/' + name, 'image/svg+xml', Buffer.from(sampleAvatar(i)));
+      await q.run('UPDATE doctors SET photo = ? WHERE id = ?', '/uploads/doctors/' + name, d.id);
     }
   }
-  const insR = db.prepare('INSERT INTO records (patient_id, doctor_id, date, tooth, procedure, fee, paid) VALUES (?,?,?,?,?,?,?)');
-  insR.run(ids[0], ds[0], S.addDays(S.today(), -3), '11, 21', 'Zirkonyum kaplama — ölçü', 12000, 6000);
-  insR.run(ids[1], ds[1 % ds.length], S.addDays(S.today(), -2), '36', 'Kanal tedavisi', 4500, 4500);
-  console.log(names.length + ' deneme hastası ve ' + k + ' randevu eklendi.');
+  console.log('Hekim biyografi ve portreleri: boş olanlara örnek eklendi.');
+
+  /* ── Örnek kullanıcılar (yalnızca yerel) ── */
+  if (process.argv.includes('--users')) {
+    if (REMOTE) throw new Error('Örnek kullanıcılar canlı veritabanına eklenmez.');
+    const pw = () => crypto.randomBytes(12).toString('base64url');   // 16 karakter, rastgele
+    const saim = await q.get("SELECT id FROM doctors WHERE name LIKE 'Saim%' ORDER BY id LIMIT 1");
+    const sample = [
+      ['Örnek Yönetici', 'yonetici@atlas.test', 'admin', null],
+      ['Örnek Sekreter', 'sekreter@atlas.test', 'staff', null],
+      ['Dt. Saim (örnek hesap)', 'saim@atlas.test', 'doctor', saim ? saim.id : null]
+    ];
+    const lines = [];
+    for (const [name, email, role, doctorId] of sample) {
+      if (await q.get('SELECT id FROM users WHERE email = ?', email)) { lines.push(email + '  (zaten vardı, parola değişmedi)'); continue; }
+      const p = pw();
+      await q.run('INSERT INTO users (name, email, pass_hash, role, doctor_id) VALUES (?,?,?,?,?)', name, email, A.hashPassword(p), role, doctorId);
+      lines.push(email.padEnd(24) + p + '   ' + role);
+    }
+    const file = path.join(DATA_DIR, 'dev-credentials.txt');
+    fs.appendFileSync(file, '# Örnek hesaplar — yalnızca yerel deneme için. Canlıya almadan önce silin.\n' + lines.join('\n') + '\n\n', { mode: 0o600 });
+    console.log('Örnek kullanıcılar oluşturuldu → ' + file);
+  }
+
+  if (process.argv.includes('--sample')) {
+    const n = await require('./sample').run();
+    console.log('Örnek veri: ' + n.patients + ' hasta, ' + n.appointments + ' randevu, ' + n.records + ' tedavi kaydı, ' + n.expenses + ' gider.');
+  }
 }
+
+main().then(() => process.exit(0), (e) => { console.error(e.message || e); process.exit(1); });

@@ -4,7 +4,7 @@
    Çalıştırma: npm run seed -- --sample */
 'use strict';
 
-const { db, tx, parseDoctor } = require('./db');
+const { q, ready, parseDoctor } = require('./db');
 const S = require('./slots');
 
 /* tekrarlanabilir rastgelelik */
@@ -32,37 +32,38 @@ const LAST = ['Yılmaz', 'Kaya', 'Demir', 'Şahin', 'Çelik', 'Yıldız', 'Yıld
   'Polat', 'Erdem', 'Aksoy', 'Güneş', 'Tekin', 'Bulut', 'Akın', 'Karaca', 'Uçar', 'Bozkurt'];
 const TEETH = ['11', '12', '13', '14', '15', '16', '21', '22', '23', '24', '25', '26', '31', '32', '36', '37', '41', '42', '46', '47'];
 
-function run() {
+async function run() {
+  await ready();
   const today = S.today(), now = S.nowLocal();
   const start = S.addDays(today, -365), end = S.addDays(today, 21);
-  const doctors = db.prepare('SELECT * FROM doctors WHERE active = 1 ORDER BY sort, id').all().map(parseDoctor);
+  const doctors = (await q.all('SELECT * FROM doctors WHERE active = 1 ORDER BY sort, id')).map(parseDoctor);
   if (!doctors.length) throw new Error('Önce hekim ekleyin (npm run seed).');
 
-  return tx(() => {
-    ['records', 'appointments', 'patients', 'expenses'].forEach((t) => db.exec('DELETE FROM ' + t));
-
+  {
     // hizmetlere örnek fiyat/maliyet (boşsa)
-    const svcs = db.prepare('SELECT * FROM services WHERE active = 1').all();
+    const svcs = await q.all('SELECT * FROM services WHERE active = 1');
     for (const s of svcs) {
       const p = PRICES[s.key];
-      if (p && !s.price) db.prepare('UPDATE services SET price = ?, cost = ? WHERE id = ?').run(p[0], p[1], s.id), s.price = p[0], s.cost = p[1];
-      else if (p && !s.cost) db.prepare('UPDATE services SET cost = ? WHERE id = ?').run(p[1], s.id), s.cost = p[1];
+      if (p && !s.price) { await q.run('UPDATE services SET price = ?, cost = ? WHERE id = ?', p[0], p[1], s.id); s.price = p[0]; s.cost = p[1]; }
+      else if (p && !s.cost) { await q.run('UPDATE services SET cost = ? WHERE id = ?', p[1], s.id); s.cost = p[1]; }
     }
     const svcW = svcs.filter((s) => PRICES[s.key]).map((s) => ({ s, w: PRICES[s.key][2] }));
     // çok seanslı tedavilerin ara seansları: ayrı kalem, fiyatı klinik isterse panelden değiştirir
-    function ensure(key, name, dur, price) {
-      let x = db.prepare('SELECT * FROM services WHERE key = ?').get(key);
+    async function ensure(key, name, dur, price) {
+      let x = await q.get('SELECT * FROM services WHERE key = ?', key);
       if (!x) {
-        db.prepare('INSERT INTO services (key, name, duration_min, price, cost, online, sort) VALUES (?,?,?,?,0,0,50)').run(key, name, dur, price);
-        x = db.prepare('SELECT * FROM services WHERE key = ?').get(key);
+        await q.run('INSERT INTO services (key, name, duration_min, price, cost, online, sort) VALUES (?,?,?,?,0,0,50)', key, name, dur, price);
+        x = await q.get('SELECT * FROM services WHERE key = ?', key);
       }
       return x;
     }
-    const steps = { 'ölçü': ensure('olcu', 'Ölçü seansı', 30, 0), prova: ensure('prova', 'Prova seansı', 30, 0), kontrol: ensure('kontrol', 'Kontrol muayenesi', 20, 0) };
+    const steps = { 'ölçü': await ensure('olcu', 'Ölçü seansı', 30, 0), prova: await ensure('prova', 'Prova seansı', 30, 0), kontrol: await ensure('kontrol', 'Kontrol muayenesi', 20, 0) };
 
-    const insP = db.prepare('INSERT INTO patients (name, phone, birth_date, gender, notes, consent_at, created_at) VALUES (?,?,?,?,?,?,?)');
-    const insA = db.prepare('INSERT INTO appointments (patient_id, doctor_id, service_id, start, end, status, source, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)');
-    const insR = db.prepare('INSERT INTO records (patient_id, doctor_id, date, tooth, procedure, note, fee, paid, service_id, cost, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+    // tüm yazmalar tek seferde (uzak veritabanında satır satır göndermek çok yavaş olur); kimlikler burada verilir
+    const stmts = ['records', 'appointments', 'patients', 'expenses'].map((t) => ['DELETE FROM ' + t, []]);
+    const insP = (...a) => stmts.push(['INSERT INTO patients (id, name, phone, birth_date, gender, notes, consent_at, created_at) VALUES (?,?,?,?,?,?,?,?)', a]);
+    const insA = { run: (...a) => stmts.push(['INSERT INTO appointments (patient_id, doctor_id, service_id, start, end, status, source, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)', a]) };
+    const insR = { run: (...a) => stmts.push(['INSERT INTO records (patient_id, doctor_id, date, tooth, procedure, note, fee, paid, service_id, cost, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)', a]) };
     const patients = [];          // { id, child }
     const phones = new Set();
     let nA = 0, nR = 0;
@@ -75,7 +76,8 @@ function run() {
       const y = child ? 2012 + Math.floor(R() * 9) : 1952 + Math.floor(R() * 52);
       const birth = y + '-' + String(1 + Math.floor(R() * 12)).padStart(2, '0') + '-' + String(1 + Math.floor(R() * 28)).padStart(2, '0');
       const at = date + ' 09:00:00';
-      const id = Number(insP.run(name, ph, birth, female ? 'Kadın' : 'Erkek', 'Örnek kayıt', at, at).lastInsertRowid);
+      const id = patients.length + 1;
+      insP(id, name, ph, birth, female ? 'Kadın' : 'Erkek', 'Örnek kayıt', at, at);
       const p = { id, child };
       patients.push(p);
       return p;
@@ -134,12 +136,12 @@ function run() {
     }
 
     // aylık giderler (tedavi başına malzeme/laboratuvar maliyeti kayıtlarda; burada klinik genel giderleri)
-    const insE = db.prepare('INSERT INTO expenses (date, category, amount, note) VALUES (?,?,?,?)');
+    const insE = { run: (...a) => stmts.push(['INSERT INTO expenses (date, category, amount, note) VALUES (?,?,?,?)', a]) };
     let nE = 0;
     for (let m = start.slice(0, 7) + '-01'; m <= today; ) {
       const ym = m.slice(0, 7), prog = (Date.parse(m) - Date.parse(start)) / (365 * 864e5);
       const day = (n) => { const d = ym + '-' + String(n).padStart(2, '0'); return d <= today && d >= start ? d : null; };
-      const add = (n, cat, amt, note) => { const d = day(n); if (d) { insE.run(d, cat, round50(amt), note); nE++; } };
+      const add = (n, cat, amt, note) => { const d = day(n); if (d) { insE.run(d, cat, round50(amt), note + ' (örnek)'); nE++; } };
       add(1, 'Kira', prog < 0.5 ? 45000 : 52000, 'Aylık kira');
       add(15, 'Personel', 285000 * (prog < 0.5 ? 1 : 1.12) * between(0.98, 1.03), 'Maaşlar ve SGK (hekim hakedişleri dahil)');
       add(10, 'Faturalar', between(7000, 12500), 'Elektrik, su, doğalgaz, internet');
@@ -150,8 +152,9 @@ function run() {
       if (R() < 0.35) add(22, 'Diğer', between(2000, 9000), 'Çeşitli');
       const d = new Date(m + 'T00:00:00Z'); d.setUTCMonth(d.getUTCMonth() + 1); m = d.toISOString().slice(0, 10);
     }
+    await q.batch(stmts);
     return { patients: patients.length, appointments: nA, records: nR, expenses: nE };
-  });
+  }
 }
 
 module.exports = { run };

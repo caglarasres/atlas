@@ -1,0 +1,11 @@
+data/
+node_modules/
+public/
+.DS_Store
+.env*
+.vercel/
+.agents/
+.claude/
+skills-lock.json
+README.md
+SECURITY.md
