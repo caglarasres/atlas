@@ -1313,7 +1313,8 @@
     function render() {
       lineChart($('.js-c1 .ch', box), labels, lineS, { full: full, aria: 'Dönemlere göre ciro, gider ve kâr',
         note: function (i) { return lastPartial && i === labels.length - 1 ? 'Dönem henüz bitmedi' : ''; } });
-      hbarChart($('.js-c2 .ch', box), d.byService.map(function (s) {
+      // ücreti olmayan ara seanslar (prova, kontrol…) grafiği boş satırlarla doldurmasın
+      hbarChart($('.js-c2 .ch', box), d.byService.filter(function (s) { return s.revenue || s.cost; }).map(function (s) {
         return { label: s.name, value: s.profit, tip: '<span class="row">Ciro<em>' + tl(s.revenue) + '</em></span><span class="row">Maliyet<em>' + tl(s.cost) + '</em></span>' +
           '<span class="row">Kâr<em>' + tl(s.profit) + '</em></span><span class="row">Marj<em>' + pct(s.margin) + '</em></span><span class="row">İşlem<em>' + s.count + '</em></span>' };
       }), { color: C.s1, aria: 'Tedavilere göre kâr' });
