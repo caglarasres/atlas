@@ -28,6 +28,7 @@ Güvenlik önlemleri ve yayın kontrol listesi: [SECURITY.md](SECURITY.md).
 ## Yayın (Vercel)
 Canlı: **https://atlasdent.vercel.app** — panel: https://atlasdent.vercel.app/admin/
 
+- **Otomatik yayın:** GitHub'da `main` dalına her push Vercel'de canlıya çıkar; diğer dallar önizleme adresi alır.
 - `api/index.js` sunucusuz işlev; `/`, `/api/*`, `/uploads/*` buna yönlenir (`vercel.json`). `assets/` ve `admin/` CDN'den sunulur.
 - Veritabanı: Turso (Vercel Marketplace, `atlasdent-db`, Dublin). `TURSO_DATABASE_URL` tanımlı değilse yerelde `data/atlas.db` kullanılır.
 - İlk yönetici: hiç kullanıcı yoksa `BOOTSTRAP_ADMIN_EMAIL` + `BOOTSTRAP_ADMIN_HASH` (scrypt özeti) ortam değişkenlerinden oluşturulur; ilk kurulum ekranı canlıda hiç açılmaz. Diğer kullanıcılar panelden (Ayarlar → Kullanıcılar) eklenir.
