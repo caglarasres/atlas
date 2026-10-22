@@ -21,7 +21,7 @@ Güvenlik önlemleri ve yayın kontrol listesi: [SECURITY.md](SECURITY.md).
 - **Analiz**: ciro, gider, net kâr, tedavi ve hekim kırılımı, yeni hasta, randevu yoğunluğu grafikleri; Giderler sekmesinden kira/maaş vb. girilir
 - **Hastalar**: hasta kartı, alerji uyarısı, randevu geçmişi, tedavi kayıtları, ücret ve bakiye
 - **Hekimler**: fotoğraf, biyografi (TR/EN/DE), sitede görünürlük, çalışma saatleri, randevu aralığı (yalnız yönetici)
-- **Tedaviler ve fiyatlar**: tedavi ekle/sil, süre, hastaya fiyat, maliyet, kâr ve marj; fiyatlar tablodan doğrudan değişir (yalnız yönetici)
+- **Hizmetler**: hizmet (bleaching, zirkonyum…) ekle/düzenle/sil, süre, hastaya fiyat, maliyet, kâr ve marj; fiyatlar tablodan doğrudan değişir (yalnız yönetici)
 - **Siteyi düzenle**: site panelin içinde açılır; yazının üzerine tıklayıp yerinde değiştirilir, hekim kartına tıklayınca fotoğraf/tanıtım formu açılır, “Yayınla” ile yayına girer. Sayfada görünmeyen metinler için liste görünümü var (yalnız yönetici)
 - **Ayarlar**: telefon/WhatsApp, online randevu kuralları, kapalı günler, kullanıcılar ve roller, iki adımlı doğrulama, güvenlik günlüğü
 

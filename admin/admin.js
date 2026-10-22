@@ -152,7 +152,7 @@
   var NAV = [
     ['', 'Gösterge', 'home'], ['takvim', 'Takvim', 'cal'], ['randevular', 'Randevular', 'list'], ['hastalar', 'Hastalar', 'users'], ['islemler', 'Yapılan işlemler', 'receipt'],
     null,
-    ['analiz', 'Analiz', 'chart', 1], ['hekimler', 'Hekimler', 'doc', 1], ['hizmetler', 'Tedaviler ve fiyatlar', 'tag', 1], ['site', 'Siteyi düzenle', 'web', 1], ['ayarlar', 'Ayarlar', 'cog']
+    ['analiz', 'Analiz', 'chart', 1], ['hekimler', 'Hekimler', 'doc', 1], ['hizmetler', 'Hizmetler', 'tag', 1], ['site', 'Siteyi düzenle', 'web', 1], ['ayarlar', 'Ayarlar', 'cog']
   ];
   function renderShell() {
     app.innerHTML =
@@ -1137,12 +1137,12 @@
     };
   }
 
-  /* ── Tedaviler ve fiyatlar ────────────────────────────────────────── */
+  /* ── Hizmetler ve fiyatlar ────────────────────────────────────────── */
   function vServices(v) {
     return loadRefs().then(function () {
-      v.innerHTML = top('Tedaviler ve fiyatlar', 'Her tedavinin süresi, hastaya fiyatı ve size maliyeti (malzeme + laboratuvar). Kâr otomatik hesaplanır.',
-        '<button class="btn btn--p js-new">' + ic('plus') + 'Tedavi ekle</button>') +
-        '<div class="card scroll"><table class="tbl"><thead><tr><th>Tedavi</th><th class="r">Süre</th><th class="r">Fiyat</th><th class="r">Maliyet</th><th class="r">Kâr</th><th class="r hide-m">Marj</th><th class="hide-m">Sitede</th><th></th></tr></thead><tbody>' +
+      v.innerHTML = top('Hizmetler', 'Kliniğin sunduğu hizmetler: süre, hastaya fiyat ve size maliyeti (malzeme + laboratuvar). Kâr otomatik hesaplanır.',
+        '<button class="btn btn--p js-new">' + ic('plus') + 'Hizmet ekle</button>') +
+        '<div class="card scroll"><table class="tbl"><thead><tr><th>Hizmet</th><th class="r">Süre</th><th class="r">Fiyat</th><th class="r">Maliyet</th><th class="r">Kâr</th><th class="r hide-m">Marj</th><th class="hide-m">Sitede</th><th></th></tr></thead><tbody>' +
         S.services.map(function (s) {
           var pr = s.price || 0, k = pr - (s.cost || 0);
           return '<tr class="click' + (s.active ? '' : ' is-off') + '" data-id="' + s.id + '"><td><b>' + esc(s.name) + '</b>' + (s.active ? '' : ' <span class="badge">Pasif</span>') + '</td>' +
@@ -1179,9 +1179,9 @@
     });
   }
   function editService(s) {
-    var m = openModal(s.id ? s.name : 'Yeni tedavi',
-      '<form class="form" novalidate><label class="f"><span>Tedavi adı</span><input name="name" value="' + esc(s.name || '') + '" placeholder="örn. Zirkonyum kaplama"></label>' +
-      '<div class="grid g3"><label class="f"><span>Hastaya fiyatı (₺)</span><input type="number" name="price" min="0" step="50" inputmode="numeric" value="' + (s.price || '') + '"></label>' +
+    var m = openModal(s.id ? s.name : 'Yeni hizmet',
+      '<form class="form" novalidate><label class="f"><span>Hizmet adı</span><input name="name" value="' + esc(s.name || '') + '" placeholder="örn. Bleaching (diş beyazlatma)"></label>' +
+      '<div class="grid g3"><label class="f"><span>Hastaya fiyatı (₺)</span><input type="number" name="price" min="0" step="50" inputmode="numeric" value="' + (s.price || '') + '"><small>Seans ya da diş başına</small></label>' +
       '<label class="f"><span>Size maliyeti (₺)</span><input type="number" name="cost" min="0" step="50" inputmode="numeric" value="' + (s.cost || '') + '"><small>Malzeme + laboratuvar</small></label>' +
       '<div class="f"><span>Kâr</span><div class="profit js-pf"></div></div></div>' +
       '<label class="f"><span>Randevu süresi</span><select name="duration_min">' + [15, 20, 30, 45, 60, 75, 90, 120].concat(s.duration_min && [15, 20, 30, 45, 60, 75, 90, 120].indexOf(s.duration_min) < 0 ? [s.duration_min] : []).map(function (n) {
@@ -1567,7 +1567,7 @@
               '<td class="hide-m mut">' + esc(e.note) + '</td><td class="r mono">' + tl(e.amount) + '</td></tr>';
           }).join('') + '</tbody></table>' : '<p class="empty">Bu ay için gider girilmemiş.</p>') + '</section>' +
         '<aside class="card"><div class="card__h"><h2>Türe göre</h2></div><div class="card__b">' + (Object.keys(byCat).length ? '<div class="ch js-ec"></div>' : '<p class="mut">—</p>') +
-        '<p class="mut" style="font-size:.82rem;margin:.8rem 0 0">Tedavi başına malzeme ve laboratuvar maliyetini burada değil, <a href="#/hizmetler">Tedaviler ve fiyatlar</a> sayfasında ya da hasta kartındaki tedavi kaydında girin.</p></div></aside></div>';
+        '<p class="mut" style="font-size:.82rem;margin:.8rem 0 0">Tedavi başına malzeme ve laboratuvar maliyetini burada değil, <a href="#/hizmetler">Hizmetler</a> sayfasında ya da hasta kartındaki tedavi kaydında girin.</p></div></aside></div>';
       var go = function (m) { expMonth = m; route(); };
       var shift = function (n) { var d = new Date(expMonth + '-01T12:00:00'); d.setMonth(d.getMonth() + n); go(ymd(d).slice(0, 7)); };
       $('.js-prev', v).onclick = function () { shift(-1); };

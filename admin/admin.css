@@ -460,3 +460,4 @@ tr:hover .cell, .cell:focus { border-color: var(--line-2) !important; background
 }
 .cal--hafta .cal__col { min-width: 0; }
 .cal .cal__col { overflow: hidden; }
+.form .g3 { align-items: start; }
